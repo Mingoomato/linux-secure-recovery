@@ -46,4 +46,49 @@ cmp "$tmp/source/nested/data.txt" "$tmp/target-clean/nested/data.txt"
 cmp "$tmp/source/nested/back\\slash.txt" "$tmp/target-clean/nested/back\\slash.txt"
 [ ! -e "$tmp/target-clean/external-link" ]
 
+# Simulate process death after the durable COPYING row, before its entry transaction.
+printf 'stale temporary bytes\n' >"$tmp/store/temp/stale-crash.part"
+ln -s "$tmp/external.txt" "$tmp/store/temp/stale-link.part"
+python3 - "$tmp/store/metadata.sqlite" <<'PY'
+import sqlite3, sys, time
+db = sqlite3.connect(sys.argv[1])
+db.execute("INSERT INTO snapshots(id,source_root,created_at,state,incomplete_count) VALUES(?,?,?,?,?)",
+           ("stale-crash", "/synthetic/source", int(time.time()), "COPYING", 0))
+db.commit()
+db.close()
+PY
+"$bin" doctor --store "$tmp/store" >"$tmp/doctor.json"
+python3 - "$tmp/doctor.json" "$tmp/store/metadata.sqlite" <<'PY'
+import json, sqlite3, sys
+result = json.load(open(sys.argv[1], encoding="utf-8"))
+assert result["recovered_incomplete"] == 1
+assert result["removed_temp_files"] == 2
+db = sqlite3.connect(sys.argv[2])
+state, incomplete = db.execute("SELECT state,incomplete_count FROM snapshots WHERE id='stale-crash'").fetchone()
+assert (state, incomplete) == ("FAILED", 1)
+PY
+[ ! -e "$tmp/store/temp/stale-crash.part" ]
+[ ! -e "$tmp/store/temp/stale-link.part" ]
+[ -e "$tmp/external.txt" ]
+set +e
+"$bin" verify --store "$tmp/store" --snapshot stale-crash >"$tmp/stale-verify.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ]
+
+# A second process must wait for the exclusive per-store operation lock.
+python3 - "$bin" "$tmp/store" <<'PY'
+import fcntl, subprocess, sys, time
+lock = open(sys.argv[2] + "/.operation.lock", "r+")
+fcntl.flock(lock, fcntl.LOCK_EX)
+proc = subprocess.Popen([sys.argv[1], "doctor", "--store", sys.argv[2]],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+time.sleep(0.15)
+assert proc.poll() is None, "doctor did not wait for the store lock"
+fcntl.flock(lock, fcntl.LOCK_UN)
+stdout, stderr = proc.communicate(timeout=5)
+assert proc.returncode == 0, stderr
+assert '"store":"ready"' in stdout
+PY
+
 echo "SRE snapshot/verify/restore smoke: PASS"

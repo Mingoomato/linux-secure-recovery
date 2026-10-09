@@ -4,7 +4,7 @@
 - Snapshot a tree, compare blob hashes, mutate source files, then restore into a separate target and compare bytes.
 - Confirm dry-run changes no target file; confirm existing files are skipped unless overwrite is explicit.
 - Corrupt a blob and manifest; verify reports corruption and refuses unsafe restore.
-- Exercise concurrent source mutation, no-space/I/O failure, crash between blob and manifest commit, unsupported openat2, quota pruning, and referenced-blob retention.
+- Exercise concurrent source mutation, no-space/I/O failure, abrupt crash between blob and manifest commit, unsupported openat2, quota pruning, and referenced-blob retention.
 - Run 1 GiB/1k benchmark and report hardware/filesystem details only after measurement.
 
-The local recovery smoke test has been run. Corruption, crash/fault injection, sanitizer, static-analysis, and performance scenarios remain pending.
+The local recovery smoke and separate ASan/UBSan smoke have been run, including a synthetic stale-row recovery and process-level store-lock check. Corruption, abrupt crash/fault injection, static analysis, and performance scenarios remain pending.

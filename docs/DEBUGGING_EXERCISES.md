@@ -26,17 +26,17 @@ Test entries with `../`, repeated separators, absolute path, a symlinked parent,
 
 **Acceptance:** No entry escapes the opened target root; safe nested paths still restore correctly; every rejected case is visible.
 
-## Exercise 3 — Prune and crash-consistency proof
+## Exercise 3 — Reproduce stale-snapshot recovery independently
 
-**Goal:** Verify deduplicated blobs survive while referenced and are collected only after the final reference disappears.
+**Goal:** Build a small independent regression test for interrupted snapshot state and verify recovery is repeatable.
 
-**Starting points:** `cmd_prune`, `snapshots`/`entries` schema, manifest unlink/SQLite commit order, content-addressed blob names.
+**Starting points:** `snapshots` table, `cmd_doctor`, `.operation.lock`, `tests/smoke.sh`.
 
-Create two snapshots that share a file, prune one, and verify the remaining snapshot. Then prune all user snapshots and check that metadata, sidecar manifests, and blob files agree. Add fault injection around DB commit and manifest removal; document recovery states.
+In a disposable store, create a committed snapshot, add a second synthetic row left in `COPYING`, and place an abandoned temp artifact in the store temp directory. Run doctor and inspect both database and filesystem state. Run it again and check whether the recovery operation is idempotent. Add the test to the project smoke suite.
 
-**Constraints:** Use disposable storage. Do not manually delete the SQLite database. Never claim all-or-nothing semantics without test evidence.
+**Constraints:** Use disposable storage. Do not manually delete the SQLite database or change a committed snapshot's state. Treat the fixture as a simulated state, not proof of power-loss behavior.
 
-**Acceptance:** No referenced blob is removed; orphan cleanup is repeatable; a simulated interruption leaves a state that `doctor` or documented recovery can identify safely.
+**Acceptance:** The committed snapshot remains verifiable, the incomplete row is not exposed as a committed snapshot, temp cleanup can be repeated safely, and the test clearly distinguishes synthetic state from a real crash.
 
 ## Owner attempt record
 

@@ -5,6 +5,7 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <sqlite3.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -172,7 +173,7 @@ sqlite3 *open_db(const std::string &store, bool create) {
     }
     sqlite3_busy_timeout(db, 5000);
     const char *schema =
-        "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;"
+        "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;"
         "CREATE TABLE IF NOT EXISTS snapshots(id TEXT PRIMARY KEY, source_root TEXT NOT NULL,"
         " created_at INTEGER NOT NULL, state TEXT NOT NULL, incomplete_count INTEGER NOT NULL DEFAULT 0);"
         "CREATE TABLE IF NOT EXISTS entries(snapshot_id TEXT NOT NULL, relative_path TEXT NOT NULL,"
@@ -209,6 +210,45 @@ void ensure_store_dirs(const std::string &store) {
     (void)chmod(hash_root.c_str(), 0700);
     (void)chmod(store.c_str(), 0700);
 }
+
+class StoreLock {
+public:
+    explicit StoreLock(const std::string &store) {
+        const std::string path = store + "/.operation.lock";
+        fd_ = open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if (fd_ < 0) throw std::runtime_error("cannot open store operation lock: " + std::string(strerror(errno)));
+        struct stat st {};
+        if (fstat(fd_, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
+            (st.st_mode & 0077) != 0 || st.st_nlink != 1) {
+            close(fd_);
+            fd_ = -1;
+            throw std::runtime_error("store operation lock must be a private, owner-owned regular file");
+        }
+        if (fchmod(fd_, 0600) != 0) {
+            int error = errno;
+            close(fd_);
+            fd_ = -1;
+            throw std::runtime_error("cannot set private store operation lock mode: " + std::string(strerror(error)));
+        }
+        while (flock(fd_, LOCK_EX) != 0) {
+            if (errno == EINTR) continue;
+            int error = errno;
+            close(fd_);
+            fd_ = -1;
+            throw std::runtime_error("cannot acquire store operation lock: " + std::string(strerror(error)));
+        }
+    }
+    StoreLock(const StoreLock &) = delete;
+    StoreLock &operator=(const StoreLock &) = delete;
+    ~StoreLock() {
+        if (fd_ >= 0) {
+            (void)flock(fd_, LOCK_UN);
+            close(fd_);
+        }
+    }
+private:
+    int fd_ = -1;
+};
 
 void save_blob(int rootfd, const std::string &store, const std::string &snapshot,
                const std::string &relative, Entry &entry, unsigned index) {
@@ -413,6 +453,7 @@ int cmd_init(int argc, char **argv) {
     std::string store = canonical_dir(store_path);
     if (beneath(source, store) || beneath(store, source))
         throw std::runtime_error("SRE_ROOT_OVERLAP: source and store must be disjoint");
+    StoreLock lock(store);
     ensure_store_dirs(store);
     sqlite3 *db = open_db(store, true);
     sqlite3_stmt *stmt = nullptr;
@@ -431,6 +472,7 @@ int cmd_snapshot(int argc, char **argv) {
     std::string store = canonical_dir(get_arg(argc, argv, "--store"));
     if (beneath(source, store) || beneath(store, source))
         throw std::runtime_error("SRE_ROOT_OVERLAP");
+    StoreLock lock(store);
     ensure_store_dirs(store);
     int rootfd = open(source.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (rootfd < 0) throw std::runtime_error("cannot open source root");
@@ -480,6 +522,7 @@ int cmd_snapshot(int argc, char **argv) {
 }
 
 int cmd_list(const std::string &store) {
+    StoreLock lock(store);
     sqlite3 *db = open_db(store, false);
     sqlite3_stmt *stmt = nullptr;
     sqlite3_prepare_v2(db, "SELECT id,source_root,created_at,state FROM snapshots WHERE id!='__store__' ORDER BY created_at DESC",
@@ -493,6 +536,7 @@ int cmd_list(const std::string &store) {
 }
 
 int cmd_verify(const std::string &store, const std::string &id) {
+    StoreLock lock(store);
     sqlite3 *db = open_db(store, false);
     (void)snapshot_source(db, id);
     auto entries = load_entries(db, id);
@@ -598,6 +642,7 @@ int restore_one(int targetfd, const std::string &store, const Entry &e, bool ove
 
 int cmd_restore(const std::string &store, const std::string &id, const std::string &target,
                 bool dry, bool confirm, bool overwrite) {
+    StoreLock lock(store);
     std::string root = canonical_dir(target);
     sqlite3 *db = open_db(store, false);
     (void)snapshot_source(db, id);
@@ -625,6 +670,7 @@ int cmd_restore(const std::string &store, const std::string &id, const std::stri
 }
 
 int cmd_prune(const std::string &store, unsigned keep) {
+    StoreLock lock(store);
     sqlite3 *db = open_db(store, false);
     sqlite3_stmt *s = nullptr;
     sqlite3_prepare_v2(db, "SELECT id FROM snapshots WHERE id!='__store__' AND state='COMMITTED' ORDER BY created_at DESC",
@@ -655,6 +701,40 @@ int cmd_prune(const std::string &store, unsigned keep) {
     audit(store, "prune", "retention", ids.size() > keep ? ids.size() - keep : 0, true);
     return 0;
 }
+
+int cmd_doctor(const std::string &store) {
+    StoreLock lock(store);
+    ensure_store_dirs(store);
+    sqlite3 *db = open_db(store, false);
+    sqlite3_stmt *stmt = nullptr;
+    sql_check(sqlite3_prepare_v2(db,
+        "UPDATE snapshots SET state='FAILED',incomplete_count=1 WHERE state='COPYING'",
+        -1, &stmt, nullptr), db, "prepare stale snapshot recovery");
+    sql_check(sqlite3_step(stmt), db, "recover stale snapshots");
+    std::size_t recovered = static_cast<std::size_t>(sqlite3_changes(db));
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+
+    std::size_t removed_temp = 0;
+    std::error_code ec;
+    const std::filesystem::path temp_dir = std::filesystem::path(store) / "temp";
+    for (std::filesystem::directory_iterator it(temp_dir, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string name = it->path().filename().string();
+        if (name.size() < 5U || name.compare(name.size() - 5U, 5U, ".part") != 0) continue;
+        std::error_code status_ec;
+        auto status = it->symlink_status(status_ec);
+        if (status_ec) throw std::runtime_error("cannot inspect temporary recovery artifact");
+        if (!std::filesystem::is_regular_file(status) && !std::filesystem::is_symlink(status)) continue;
+        if (!std::filesystem::remove(it->path(), status_ec) || status_ec)
+            throw std::runtime_error("cannot remove stale temporary recovery artifact");
+        ++removed_temp;
+    }
+    if (ec) throw std::runtime_error("cannot enumerate temporary recovery artifacts");
+    std::cout << "{\"store\":\"ready\",\"openat2\":\"required\",\"coverage\":\"local-only\","
+              << "\"recovered_incomplete\":" << recovered
+              << ",\"removed_temp_files\":" << removed_temp << "}\n";
+    return 0;
+}
 } // namespace
 
 int main(int argc, char **argv) {
@@ -682,10 +762,7 @@ int main(int argc, char **argv) {
             return cmd_prune(store, static_cast<unsigned>(keep));
         }
         if (command == "doctor") {
-            sqlite3 *db = open_db(store, false);
-            sqlite3_close(db);
-            std::cout << "{\"store\":\"ready\",\"openat2\":\"required\",\"coverage\":\"local-only\"}\n";
-            return 0;
+            return cmd_doctor(store);
         }
         throw std::runtime_error("unknown command");
     } catch (const std::exception &e) {

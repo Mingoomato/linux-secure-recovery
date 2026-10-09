@@ -20,6 +20,10 @@ When overwrite is disabled, `renameat2(..., RENAME_NOREPLACE)` prevents replacin
 
 SQLite WAL and `synchronous=FULL` provide DB transaction behavior; they do not coordinate automatically with blob files or JSON manifest files. SRE deliberately makes blob content durable before inserting references. Crash states can still include an orphan blob, a `COPYING` row, or a DB-committed snapshot whose sidecar manifest was not written. A recovery procedure should inspect state and verify references before garbage collection.
 
+The connection enables `PRAGMA foreign_keys=ON`, so deleting a snapshot can cascade to its entry rows; SQLite does not enable foreign-key enforcement by default on every connection. The code also uses a per-store `flock(LOCK_EX)` file. Linux `flock` is advisory and associated with an open file description: an SRE process waits for other SRE processes using the same lock file, while unrelated code can ignore it. The lock FD's lifetime spans the command and ends when the RAII owner unlocks/closes it.
+
+`doctor` handles two recognizable leftovers under that lock: database rows still marked `COPYING` become `FAILED` with `incomplete_count=1`, and `.part` artifacts are removed from `temp/`. This is a conservative cleanup state transition, not reconstruction. A committed SQLite row with a missing JSON sidecar, a valid-looking but unreferenced blob, or device-level reordering still needs separate reconciliation and fault-injection evidence.
+
 ## Failure/resource lifetime
 
 `read` may return fewer bytes than requested or `EINTR`; `write_all` retries interruptions and partial writes. `ENOSPC`, `EIO`, fsync failure, rename failure, and close errors require explicit treatment. Each FD must be closed once on all branches. A source mutation should abort the snapshot rather than claim a stable hash. A corrupt blob must fail verification or staged-restore hash validation.
@@ -27,6 +31,7 @@ SQLite WAL and `synchronous=FULL` provide DB transaction behavior; they do not c
 ## Official references
 
 - [`openat2(2)`](https://man7.org/linux/man-pages/man2/openat2.2.html) and [`path_resolution(7)`](https://man7.org/linux/man-pages/man7/path_resolution.7.html)
+- [`flock(2)`](https://man7.org/linux/man-pages/man2/flock.2.html) and [SQLite foreign-key support](https://www.sqlite.org/foreignkeys.html)
 - [`fsync(2)`](https://man7.org/linux/man-pages/man2/fsync.2.html), [`rename(2)`](https://man7.org/linux/man-pages/man2/rename.2.html), [`openat(2)`](https://man7.org/linux/man-pages/man2/openat.2.html)
 - [SQLite WAL](https://www.sqlite.org/wal.html) and [SQLite Atomic Commit](https://www.sqlite.org/atomiccommit.html)
 - [OpenSSL EVP digest API](https://docs.openssl.org/3.0/man3/EVP_DigestInit/)

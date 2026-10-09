@@ -1,8 +1,8 @@
 # Code Walkthrough — Linux Secure Recovery Engine
 
-## 1. CLI and roots
+## 1. CLI, operation lock, and roots
 
-`main` dispatches the SRE commands. `canonical_dir` rejects a symlink or non-directory input and resolves an existing directory. `cmd_init` and `cmd_snapshot` reject source/store overlap. The source root is opened as a directory FD; later traversal is rooted there rather than using the process working directory.
+`main` dispatches the SRE commands. Every command that uses a store obtains `StoreLock`, which opens `.operation.lock` with `O_NOFOLLOW`, checks that it is a private owner-owned regular file, and waits for `flock(LOCK_EX)`. RAII releases and closes the lock FD when the command returns. This serializes SRE's own operations; advisory locks do not stop unrelated tools that ignore them. `canonical_dir` rejects a symlink or non-directory input and resolves an existing directory. `cmd_init` and `cmd_snapshot` reject source/store overlap. The source root is opened as a directory FD; later traversal is rooted there rather than using the process working directory.
 
 ## 2. Opening source paths
 
@@ -20,9 +20,9 @@
 
 `cmd_restore` validates the target root and snapshot, then either prints a dry-run plan or requires `--confirm`. `ensure_parent` walks/creates destination directories with `mkdirat` and `openat(O_DIRECTORY|O_NOFOLLOW)`. `restore_one` checks conflict policy, opens the blob, creates a same-directory temp file, copies and fsyncs bytes, reopens and hashes the staged file, applies mode, then uses `renameat2`. It confirms that the installed entry is the staged inode and fsyncs the destination directory. The code restores mode but does not restore ownership or mtime.
 
-## 5. Pruning and audit
+## 5. Doctor, pruning, and audit
 
-`cmd_prune` orders committed snapshots by creation time, deletes database rows beyond the retention count, removes JSON manifests, computes the set of still-referenced hashes, and recursively removes unreferenced regular files. Review transaction boundaries and crash behavior: manifest unlink happens before the SQLite transaction commits, and GC is not fault-injection tested. `audit` appends operation ID/count/confirmation metadata to a local NDJSON file.
+`cmd_doctor` runs under the same store lock, changes leftover `COPYING` rows to `FAILED` with one incomplete item, and removes regular files or symlinks ending in `.part` from `temp/`. The test seeds this state directly in SQLite; it is not a true process-crash simulation. `cmd_prune` orders committed snapshots by creation time, deletes database rows beyond the retention count, removes JSON manifests, computes the set of still-referenced hashes, and recursively removes unreferenced regular files. Review transaction boundaries and crash behavior: manifest unlink happens before the SQLite transaction commits, and GC is not fault-injection tested. `audit` appends operation ID/count/confirmation metadata to a local NDJSON file.
 
 ## 6. Ownership and failure review
 
