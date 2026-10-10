@@ -6,7 +6,7 @@
 
 **목표:** 복원 대상 안의 symlink 부모 디렉터리가 대상 루트 밖 쓰기로 이어지지 않음을 증명합니다.
 
-**읽을 위치:** `ensure_parent`, `restore_one`, `safe_relative_path`, `tests/smoke.sh`.
+**읽을 위치:** `ensure_parent`, `restore_one`, `src/path_safety.hpp`, `tests/smoke.sh`.
 
 중첩된 target 경로 구성요소를 외부 임시 디렉터리를 가리키는 symlink로 만들고 confirmed restore를 수행합니다. 반환값, 진단, 외부 디렉터리와 target 파일을 검사하고 통합 회귀 테스트를 추가합니다.
 

@@ -4,13 +4,14 @@
 
 Secure Recovery Engine(SRE)은 변경 전에 사용자가 명시적으로 만든 로컬 파일 스냅샷을 검증하고 복원하는 C++20 학습 프로젝트입니다. `openat2`, 파일 디스크립터 기반 경로 처리, SHA-256, SQLite 상태 관리, `fsync`와 원자적 파일 교체를 통해 Linux 시스템 프로그래밍의 보안 경계를 공부하도록 설계했습니다. 손상 후 만든 백업은 손상 전 데이터를 복구하지 못하며, 이 프로젝트는 실전 랜섬웨어 방어 제품이나 불변 백업이라고 주장하지 않습니다.
 
-구현에는 `init`, `snapshot`, `list`, `show`, `verify`, `restore`, `prune`, `doctor`가 있습니다. 2026-10-10 기준 GCC Release, Clang Release, ASan/UBSan Debug의 빌드와 CTest가 각각 통과했고 Clang 정적 분석은 진단을 내지 않았습니다. 테스트는 blob 및 manifest 손상, schema 검증형 restore 계획, 복원 충돌, mode/mtime, 감사 이벤트 계약, 보존 정리, 합성 중단 상태를 다룹니다. 구현은 SRS-04 전체 완료가 아닙니다. 전원 손실·실제 강제 종료 매트릭스, 자원 고갈 fault injection, 1 GiB 성능 측정, quota, ACL/xattr, 소유권 복원 성공 조건, 트리 전체 일관성은 입증되지 않았습니다. 자동화 검증은 소유자의 개인 숙련도 증거가 아닙니다.
+구현에는 `init`, `snapshot`, `list`, `show`, `verify`, `restore`, `prune`, `doctor`가 있습니다. 2026-10-10 기준 GCC/Clang Release, Clang ASan/UBSan, Clang libFuzzer 구성의 CTest가 각각 통과했고 Clang 정적 분석은 진단을 내지 않았습니다. 경로 helper는 경로 문자열을 복사하지 않는 `std::string_view` 기반 순수 검사이며 길이, NUL, 절대경로, 빈/점 구성요소를 제한합니다. 테스트는 root overlap 초기화 부작용, blob 및 manifest 손상, schema 검증형 restore 계획, 복원 충돌, mode/uid/gid/mtime, 감사 이벤트 계약, 보존 정리, 합성 중단 상태와 10,000-run path fuzz smoke를 다룹니다. 구현은 SRS-04 전체 완료가 아닙니다. 전원 손실·실제 강제 종료 매트릭스, 자원 고갈 fault injection, 1 GiB 성능 측정, quota, ACL/xattr, 권한별 소유권 복원, 트리 전체 일관성은 입증되지 않았습니다. 자동화 검증은 소유자의 개인 숙련도 증거가 아닙니다.
 
 ## 하위 시스템이 필요한 이유
 
 | 하위 시스템 | 해결하는 문제 | 핵심 위치 |
 |---|---|---|
 | 루트 검증 | 원본과 저장소의 중첩, symlink 루트를 차단 | `canonical_dir`, `cmd_init`, `cmd_snapshot` |
+| 경로 문법 검증 | DB/CLI에서 들어온 상대 파일 경로와 snapshot ID의 traversal 및 잘못된 바이트를 차단 | `src/path_safety.hpp`, `load_entries` |
 | 저장소 잠금 | SRE의 복원·검증과 prune/GC가 서로 간섭하지 않게 직렬화 | `StoreLock`, `flock(LOCK_EX)` |
 | 경로 제한 | 공격자가 바꿀 수 있는 문자열 경로가 루트 밖으로 나가거나 symlink를 따라가지 않게 함 | `open_beneath`, `openat2` |
 | 안정 파일 읽기와 blob 저장 | 복사 중 변한 파일을 정상 스냅샷으로 기록하지 않고 내용으로 중복 제거 | `save_blob`, `sha256_fd`, `same_state` |
@@ -35,6 +36,7 @@ Secure Recovery Engine(SRE)은 변경 전에 사용자가 명시적으로 만든
 ### 조회·검증·복원·정리
 
 - `show`는 SQLite 스냅샷 행과 엔트리 집계를 JSON으로 보여 줍니다. `list`는 요약 행을 여러 개 출력합니다.
+- `load_entries`는 SQLite TEXT의 NUL 종료 문자열만 믿지 않고 `sqlite3_column_bytes` 길이로 전체 경로 바이트를 복사한 뒤 helper로 검사합니다. helper는 borrowed `string_view`를 동기 호출 안에서만 사용하므로 수명 연장은 없습니다.
 - `verify`는 DB 엔트리와 매니페스트 sidecar의 정합성을 비교하고 각 blob이 일반 파일인지, 크기와 SHA-256이 맞는지 확인합니다.
 - `restore --dry-run`은 dirfd/no-follow 기준으로 target 부모와 엔트리를 확인하고 create/preserve/replace/blocked 동작을 JSONL로 출력합니다. 파일별 row와 summary는 `restore-plan-v1` schema를 따르며 delete=0, writes_performed=false를 나타냅니다. 계획은 현재 상태의 관찰이므로 나중의 overwrite race를 막는 lock은 아닙니다. 실제 쓰기는 `--confirm`, 기존 항목 교체는 `--overwrite`가 필요합니다.
 - `restore_one`은 대상 디렉터리 FD 아래에 부모를 만들고 같은 디렉터리에 임시 파일을 만듭니다. blob을 복사하고 staged 파일의 크기·해시를 검사한 뒤 mode/소유권/mtime을 가능한 범위에서 적용하고 `renameat2`로 파일 하나를 설치합니다.
@@ -75,3 +77,4 @@ Secure Recovery Engine(SRE)은 변경 전에 사용자가 명시적으로 만든
 - [`fsync(2)`](https://man7.org/linux/man-pages/man2/fsync.2.html), [`rename(2)`](https://man7.org/linux/man-pages/man2/rename.2.html), [`flock(2)`](https://man7.org/linux/man-pages/man2/flock.2.html), [`stat(2)`](https://man7.org/linux/man-pages/man2/stat.2.html)
 - [SQLite WAL](https://www.sqlite.org/wal.html), [SQLite Atomic Commit](https://www.sqlite.org/atomiccommit.html), [SQLite foreign keys](https://www.sqlite.org/foreignkeys.html)
 - [OpenSSL EVP digest API](https://docs.openssl.org/3.0/man3/EVP_DigestInit/)
+- [LLVM libFuzzer](https://llvm.org/docs/LibFuzzer.html)

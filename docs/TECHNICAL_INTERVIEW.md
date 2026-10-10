@@ -41,5 +41,9 @@
 26. 100개 crash injection 지점을 설계한다면 어떤 상태 경계와 기존 데이터 불변 조건을 검증합니까?
 27. 다른 배포판과 파일시스템에서 `fsync`/rename 보장을 검증하기 위해 어떤 실험 기록이 필요합니까?
 28. 현재 CTest, ASan/UBSan, Clang analyzer 결과가 각각 어떤 결함 종류를 놓칠 수 있습니까?
+29. `safe_relative_path`가 거부하는 lexical form을 설명하고, 왜 이것만으로 symlink/TOCTOU containment가 해결되지 않습니까?
+30. `load_entries`가 `sqlite3_column_text`의 NUL 종료 길이 대신 `sqlite3_column_bytes`를 확인하는 이유와 embedded NUL 경로의 위험은 무엇입니까?
+31. `cmd_init`에서 store 부모를 canonicalize한 후 mkdir 전에 overlap을 검사하는 이유는 무엇이며, mkdir 후 재검사는 어떤 경쟁을 다룹니까?
+32. path fuzzer가 10,000 runs를 통과했다는 결과가 실제 `openat2` 경로 안전성이나 전체 SRS fuzz 요구사항을 증명하지 않는 이유는 무엇입니까?
 
 오너의 학습·재현 여부는 별도 추적합니다. 이 문서나 자동화된 테스트 통과만으로 개인 숙련도를 판정하지 않습니다.

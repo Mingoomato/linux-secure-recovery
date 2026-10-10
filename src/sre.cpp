@@ -30,6 +30,8 @@
 #include <string>
 #include <vector>
 
+#include "path_safety.hpp"
+
 namespace {
 constexpr std::uint64_t kMaxFileBytes = 1ULL << 30;
 struct Entry {
@@ -445,27 +447,6 @@ std::string blob_path(const std::string &store, const std::string &hash) {
     return store + "/blobs/sha256/" + hash.substr(0, 2) + "/" + hash;
 }
 
-bool safe_snapshot_id(const std::string &id) {
-    return !id.empty() && id.size() <= 128U &&
-        std::all_of(id.begin(), id.end(), [](unsigned char c) {
-            return std::isalnum(c) != 0 || c == '-' || c == '_';
-        });
-}
-
-bool safe_relative_path(const std::string &path) {
-    if (path.empty() || path.front() == '/')
-        return false;
-    std::size_t start = 0;
-    while (start < path.size()) {
-        std::size_t end = path.find('/', start);
-        std::string part = path.substr(start, end == std::string::npos ? end : end - start);
-        if (part.empty() || part == "." || part == "..") return false;
-        if (end == std::string::npos) break;
-        start = end + 1U;
-    }
-    return true;
-}
-
 std::vector<Entry> load_entries(sqlite3 *db, const std::string &id) {
     sqlite3_stmt *stmt = nullptr;
     sql_check(sqlite3_prepare_v2(db,
@@ -475,14 +456,22 @@ std::vector<Entry> load_entries(sqlite3 *db, const std::string &id) {
     std::vector<Entry> result;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         Entry e;
-        e.path = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 0));
-        e.hash = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 1));
+        const auto *path_text = sqlite3_column_text(stmt, 0);
+        const int path_bytes = sqlite3_column_bytes(stmt, 0);
+        const auto *hash_text = sqlite3_column_text(stmt, 1);
+        const int hash_bytes = sqlite3_column_bytes(stmt, 1);
+        if (!path_text || path_bytes <= 0 || !hash_text || hash_bytes != 64) {
+            sqlite3_finalize(stmt);
+            throw std::runtime_error("invalid text field in manifest database");
+        }
+        e.path.assign(reinterpret_cast<const char *>(path_text), static_cast<std::size_t>(path_bytes));
+        e.hash.assign(reinterpret_cast<const char *>(hash_text), static_cast<std::size_t>(hash_bytes));
         e.size = static_cast<std::uint64_t>(sqlite3_column_int64(stmt, 2));
         e.mode = static_cast<std::uint32_t>(sqlite3_column_int(stmt, 3));
         e.uid = static_cast<std::uint32_t>(sqlite3_column_int(stmt, 4));
         e.gid = static_cast<std::uint32_t>(sqlite3_column_int(stmt, 5));
         e.mtime_ns = sqlite3_column_int64(stmt, 6);
-        if (!safe_relative_path(e.path)) {
+        if (!sre::path::safe_relative_path(e.path)) {
             sqlite3_finalize(stmt);
             throw std::runtime_error("unsafe relative path in manifest");
         }
@@ -531,7 +520,7 @@ std::string manifest_document(const std::string &id, const std::string &source,
 
 void write_manifest_atomic(const std::string &store, const std::string &id,
                            const std::string &document) {
-    if (!safe_snapshot_id(id) || document.size() > 64U * 1024U * 1024U)
+    if (!sre::path::safe_snapshot_id(id) || document.size() > 64U * 1024U * 1024U)
         throw std::runtime_error("manifest identity or size limit exceeded");
     const std::string temp = store + "/temp/" + id + ".manifest.part";
     const std::string final = store + "/manifests/" + id + ".json";
@@ -598,7 +587,7 @@ std::int64_t snapshot_created_at(sqlite3 *db, const std::string &id) {
 
 bool manifest_matches_db(const std::string &store, sqlite3 *db, const std::string &id,
                          const std::string &source, const std::vector<Entry> &entries) {
-    if (!safe_snapshot_id(id)) throw std::runtime_error("unsafe snapshot identifier");
+    if (!sre::path::safe_snapshot_id(id)) throw std::runtime_error("unsafe snapshot identifier");
     const auto created_at = snapshot_created_at(db, id);
     const std::string expected = manifest_document(id, source, created_at, entries);
     const std::string actual = read_file_bounded(store + "/manifests/" + id + ".json", 64U * 1024U * 1024U);
@@ -653,11 +642,29 @@ int cmd_init(int argc, char **argv) {
     std::string source = canonical_dir(get_arg(argc, argv, "--source"));
     std::string store_path = get_arg(argc, argv, "--store");
     if (store_path.empty()) throw std::runtime_error("init requires --source and --store");
-    if (mkdir(store_path.c_str(), 0700) != 0 && errno != EEXIST)
-        throw std::runtime_error("cannot create backup store");
-    std::string store = canonical_dir(store_path);
+    const std::filesystem::path requested = std::filesystem::absolute(store_path).lexically_normal();
+    const std::string store_name = requested.filename().string();
+    if (store_name.empty() || store_name == "." || store_name == "..")
+        throw std::runtime_error("store path must name a child directory");
+    const std::string parent = canonical_dir(requested.parent_path().string());
+    std::string store = (std::filesystem::path(parent) / store_name).lexically_normal().string();
+    struct stat requested_store_stat {};
+    bool store_exists = false;
+    if (lstat(store.c_str(), &requested_store_stat) == 0) {
+        store_exists = true;
+        store = canonical_dir(store);
+    } else if (errno != ENOENT) {
+        throw std::runtime_error("cannot inspect backup store path: " + std::string(strerror(errno)));
+    }
     if (beneath(source, store) || beneath(store, source))
         throw std::runtime_error("SRE_ROOT_OVERLAP: source and store must be disjoint");
+    if (!store_exists) {
+        if (mkdir(store.c_str(), 0700) != 0 && errno != EEXIST)
+            throw std::runtime_error("cannot create backup store");
+        store = canonical_dir(store);
+        if (beneath(source, store) || beneath(store, source))
+            throw std::runtime_error("SRE_ROOT_OVERLAP: source and store must be disjoint");
+    }
     StoreLock lock(store);
     ensure_store_dirs(store);
     sqlite3 *db = open_db(store, true);
@@ -773,7 +780,7 @@ int cmd_list(const std::string &store) {
 }
 
 int cmd_show(const std::string &store, const std::string &id) {
-    if (!safe_snapshot_id(id)) throw std::runtime_error("invalid snapshot ID");
+    if (!sre::path::safe_snapshot_id(id)) throw std::runtime_error("invalid snapshot ID");
     StoreLock lock(store);
     sqlite3 *db = open_db(store, false);
     sqlite3_stmt *stmt = nullptr;
@@ -890,7 +897,7 @@ struct RestorePlanItem {
 
 RestorePlanItem inspect_restore_target(int rootfd, const Entry &entry, bool overwrite) {
     RestorePlanItem result;
-    if (!safe_relative_path(entry.path)) {
+    if (!sre::path::safe_relative_path(entry.path)) {
         result.inspection_errno = EINVAL;
         return result;
     }
@@ -1245,7 +1252,7 @@ int cmd_doctor(const std::string &store) {
         const std::string name(entry->d_name);
         if (name.size() <= 5U || name.compare(name.size() - 5U, 5U, ".json") != 0) continue;
         const std::string id = name.substr(0, name.size() - 5U);
-        if (!safe_snapshot_id(id) || committed_ids.contains(id)) continue;
+        if (!sre::path::safe_snapshot_id(id) || committed_ids.contains(id)) continue;
         struct stat manifest_st {};
         if (fstatat(manifest_dirfd, name.c_str(), &manifest_st, AT_SYMLINK_NOFOLLOW) != 0) {
             if (errno == ENOENT) { errno = 0; continue; }

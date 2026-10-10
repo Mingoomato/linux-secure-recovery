@@ -6,6 +6,8 @@
 
 `readdir`는 이름을 열거할 뿐 해당 파일을 안전하게 열었다는 뜻은 아닙니다. SRE는 `fstatat(..., AT_SYMLINK_NOFOLLOW)`로 종류를 확인한 다음 루트 FD에서 다시 상대 경로를 엽니다. 현재 `st_dev` 비교는 다른 device를 건너뛰는 제한된 정책이며 동일 device bind mount 전체를 식별하는 정책은 아닙니다.
 
+그 전에 `src/path_safety.hpp`의 `safe_relative_path(std::string_view)`가 길이, 선행 slash, NUL, 빈 구성요소, `.`/`..`, `NAME_MAX`를 검사합니다. 이 검사는 syscall 기반 containment보다 얕은 문법 검증입니다. `load_entries`가 SQLite TEXT를 복사할 때 `sqlite3_column_bytes`를 사용하므로 NUL 뒤의 바이트도 사라지지 않고 검사 대상에 포함됩니다. `cmd_init`도 source/store 경로 overlap을 새 store 생성 전에 검사해 거부 동작의 부작용을 줄입니다.
+
 ## 파일 안정성, 해시, 메모리
 
 `open` 이후 FD는 열린 inode를 가리킵니다. `fstat`를 복사 전후 실행해 device, inode, 크기, 나노초 mtime을 비교하면 흔한 동시 변경을 감지합니다. 이는 원본 전체를 잠그지 않으며 모든 파일이 같은 시점에 존재했던 것처럼 보장하지도 않습니다.
@@ -32,7 +34,7 @@
 
 ## 메타데이터 복원과 부분 성공
 
-`fchown`은 uid/gid를 설정하고 `fchmod`는 권한 비트를 설정합니다. 소유권 변경은 일반 사용자에게 허용되지 않을 수 있으며, 소유권 변경은 setuid/setgid 비트에도 영향을 줄 수 있으므로 코드가 mode를 다시 적용합니다. `futimens`는 저장된 mtime을 설정하고 atime은 `UTIME_OMIT`로 유지합니다. 어느 하나가 실패하면 결과에 `metadata_partial`을 올립니다. 현재 테스트는 mode와 mtime만 확인했고 권한 경계별 UID/GID 복원은 확인하지 않았습니다.
+`fchown`은 uid/gid를 설정하고 `fchmod`는 권한 비트를 설정합니다. 소유권 변경은 일반 사용자에게 허용되지 않을 수 있으며, 소유권 변경은 setuid/setgid 비트에도 영향을 줄 수 있으므로 코드가 mode를 다시 적용합니다. `futimens`는 저장된 mtime을 설정하고 atime은 `UTIME_OMIT`로 유지합니다. 어느 하나가 실패하면 결과에 `metadata_partial`을 올립니다. 현재 smoke는 복원 파일의 UID/GID/mode/mtime이 source와 같은지 검사하지만, 다른 UID를 복원하는 권한 경계나 거부되는 `fchown`의 partial 경로는 시험하지 않았습니다.
 
 ## 자원 수명 점검
 
@@ -48,3 +50,4 @@
 - [`fsync(2)`](https://man7.org/linux/man-pages/man2/fsync.2.html), [`rename(2)`](https://man7.org/linux/man-pages/man2/rename.2.html), [`flock(2)`](https://man7.org/linux/man-pages/man2/flock.2.html), [`stat(2)`](https://man7.org/linux/man-pages/man2/stat.2.html), [`utimensat(2)`](https://man7.org/linux/man-pages/man2/utimensat.2.html)
 - [SQLite WAL](https://www.sqlite.org/wal.html), [SQLite Atomic Commit](https://www.sqlite.org/atomiccommit.html), [SQLite foreign keys](https://www.sqlite.org/foreignkeys.html)
 - [OpenSSL EVP digest API](https://docs.openssl.org/3.0/man3/EVP_DigestInit/)
+- [LLVM libFuzzer](https://llvm.org/docs/LibFuzzer.html)

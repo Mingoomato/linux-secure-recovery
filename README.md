@@ -38,9 +38,13 @@ mkdir -p "$HOME/recovery-lab" "$HOME/.local/share/sre-store" "$HOME/recovery-tar
 
 ### 검증과 현재 한계
 
-GCC Release, Clang Release, Clang 정적 분석, ASan/UBSan Debug의 로컬 빌드와 CTest가 통과했습니다. 스모크 검증은 snapshot 상세 조회, blob/sidecar 손상 검출과 복원 거부, schema 검증을 포함한 dry-run 충돌 계획, 실제 파일 내용 및 mode/mtime 복원, 감사 JSON Schema·권한·건수·바이트 수, prune과 공유 blob 보존, 합성 중단 상태의 `doctor`, 저장소 잠금 대기를 확인합니다. 자세한 기록은 [`docs/TEST_RESULTS.md`](docs/TEST_RESULTS.md)와 [`docs/REQUIREMENTS_TRACEABILITY.md`](docs/REQUIREMENTS_TRACEABILITY.md)에 있습니다.
+GCC Release, Clang Release, Clang 정적 분석, ASan/UBSan Debug, 별도 Clang libFuzzer 구성의 로컬 빌드와 CTest가 통과했습니다. 스모크 검증은 snapshot 상세 조회, 경로 parser 및 10,000-run fuzz smoke, source/store overlap의 초기화 부작용 방지, blob/sidecar 손상 검출과 복원 거부, schema 검증을 포함한 dry-run 충돌 계획, 실제 파일 내용 및 mode/uid/gid/mtime 복원, confirm 누락 거부와 unrelated target 보존, 감사 JSON Schema·권한·건수·바이트 수, prune과 공유 blob 보존, 합성 중단 상태의 `doctor`, 저장소 잠금 대기를 확인합니다. 자세한 기록은 [`docs/TEST_RESULTS.md`](docs/TEST_RESULTS.md)와 [`docs/REQUIREMENTS_TRACEABILITY.md`](docs/REQUIREMENTS_TRACEABILITY.md)에 있습니다.
 
 실제 프로세스/전원 손실 crash matrix, ENOSPC/EIO/EACCES fault injection, 원본 동시 변경, 1 GiB 성능 측정과 복수 배포판 검증은 수행하지 않았습니다. quota, ACL/xattr, 트리 전체 일관성, 원격/암호화 백업은 구현되지 않았습니다. 저장소는 root나 같은 사용자의 변조, 잠금을 따르지 않는 프로그램, 같은 디스크 고장에 대한 보호를 제공하지 않습니다. 복원은 파일별로 이루어져 일부만 성공할 수 있습니다.
+
+### 학습 패키지
+
+한국어 학습 자료: [`docs/ENGINEERING_STUDY_GUIDE.md`](docs/ENGINEERING_STUDY_GUIDE.md), [`docs/CODE_WALKTHROUGH.md`](docs/CODE_WALKTHROUGH.md), [`docs/LINUX_INTERNALS_EXPLAINED.md`](docs/LINUX_INTERNALS_EXPLAINED.md), [`docs/DEBUGGING_EXERCISES.md`](docs/DEBUGGING_EXERCISES.md), [`docs/TECHNICAL_INTERVIEW.md`](docs/TECHNICAL_INTERVIEW.md). 구현 연습 3개는 완성 코드를 공개하지 않습니다. 저장소 검증과 소유자의 학습·재현 상태는 별도 추적하며, 직접 증거가 없어 현재 숙련도는 미평가입니다.
 
 ## English
 
@@ -78,6 +82,10 @@ mkdir -p "$HOME/recovery-lab" "$HOME/.local/share/sre-store" "$HOME/recovery-tar
 
 ### Verification and limitations
 
-GCC Release, Clang Release, Clang static analysis, and ASan/UBSan Debug builds and local CTest runs passed. The smoke suite checks snapshot details, corrupt blob/sidecar detection and restore refusal, schema-validated dry-run conflict plans, restored bytes and mode/mtime, audit schema/permissions/counts/bytes, prune with shared-blob retention, synthetic interrupted-state recovery, and lock waiting. See [`docs/TEST_RESULTS.md`](docs/TEST_RESULTS.md) and [`docs/REQUIREMENTS_TRACEABILITY.md`](docs/REQUIREMENTS_TRACEABILITY.md).
+GCC Release, Clang Release, Clang static analysis, ASan/UBSan Debug, and a separate Clang libFuzzer build and local CTest runs passed. The suite checks the path parser and a 10,000-run fuzz smoke, side-effect-free source/store overlap rejection, snapshot details, corrupt blob/sidecar detection and restore refusal, schema-validated dry-run conflict plans, restored bytes and mode/uid/gid/mtime, rejection when `--confirm` is missing, preservation of unrelated target entries, audit schema/permissions/counts/bytes, prune with shared-blob retention, synthetic interrupted-state recovery, and lock waiting. See [`docs/TEST_RESULTS.md`](docs/TEST_RESULTS.md) and [`docs/REQUIREMENTS_TRACEABILITY.md`](docs/REQUIREMENTS_TRACEABILITY.md).
 
 Real process/power-loss crash matrices, ENOSPC/EIO/EACCES fault injection, concurrent source mutation, a 1 GiB benchmark, and multi-distribution verification have not been run. Quota, ACL/xattr, whole-tree consistency, remote storage, and encryption are not implemented. The local store does not protect against root or same-user tampering, programs that ignore its advisory lock, or failure of the same disk. Restore is per file and may partially complete.
+
+### Study package
+
+The Korean study files are [`docs/ENGINEERING_STUDY_GUIDE.md`](docs/ENGINEERING_STUDY_GUIDE.md), [`docs/CODE_WALKTHROUGH.md`](docs/CODE_WALKTHROUGH.md), [`docs/LINUX_INTERNALS_EXPLAINED.md`](docs/LINUX_INTERNALS_EXPLAINED.md), [`docs/DEBUGGING_EXERCISES.md`](docs/DEBUGGING_EXERCISES.md), and [`docs/TECHNICAL_INTERVIEW.md`](docs/TECHNICAL_INTERVIEW.md). The three coding exercises intentionally omit complete solutions. Repository verification and owner study/reproduction status are tracked separately; owner mastery is unevaluated without direct evidence.

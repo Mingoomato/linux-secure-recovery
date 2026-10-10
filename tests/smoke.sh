@@ -13,6 +13,12 @@ printf 'unicode path bytes\n' >"$tmp/source/nested/한글.txt"
 python3 - "$tmp/source/nested/data.txt" <<'PY'
 import os, sys
 os.chmod(sys.argv[1], 0o640)
+groups = sorted(set(os.getgroups()) - {os.getgid()})
+if groups:
+    try:
+        os.chown(sys.argv[1], os.getuid(), groups[0])
+    except PermissionError:
+        pass
 os.utime(sys.argv[1], ns=(1_700_000_000_123456789, 1_700_000_000_123456789))
 PY
 printf 'do not follow\n' >"$tmp/external.txt"
@@ -25,6 +31,30 @@ rc=$?
 set -e
 [ "$rc" -ne 0 ]
 [ ! -e "$tmp/unsafe-store" ]
+
+# Root overlap must be rejected before init creates anything inside either root.
+set +e
+"$bin" init --source "$tmp/source" --store "$tmp/source/overlap-store" >"$tmp/nested-store.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ]
+grep -q 'SRE_ROOT_OVERLAP' "$tmp/nested-store.out"
+[ ! -e "$tmp/source/overlap-store" ]
+set +e
+"$bin" init --source "$tmp/source" --store "$tmp" >"$tmp/parent-store.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ]
+grep -q 'SRE_ROOT_OVERLAP' "$tmp/parent-store.out"
+[ ! -e "$tmp/metadata.sqlite" ]
+[ ! -e "$tmp/blobs" ]
+set +e
+"$bin" init --source "$tmp/source" --store "$tmp/source" >"$tmp/same-root.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ]
+grep -q 'SRE_ROOT_OVERLAP' "$tmp/same-root.out"
+[ ! -e "$tmp/source/metadata.sqlite" ]
 
 "$bin" init --source "$tmp/source" --store "$tmp/store"
 snapshot_output=$("$bin" snapshot --source "$tmp/source" --store "$tmp/store" --label smoke)
@@ -147,15 +177,29 @@ import json, sys
 result = json.loads(open(sys.argv[1], encoding="utf-8").read().splitlines()[-1])
 assert result["conflicts"] == 1 and result["restored"] == 2
 PY
+mkdir -p "$tmp/target-no-confirm/nested"
+printf 'must remain without explicit confirmation\n' >"$tmp/target-no-confirm/nested/data.txt"
+cp "$tmp/target-no-confirm/nested/data.txt" "$tmp/no-confirm.expected"
+set +e
+"$bin" restore --store "$tmp/store" --snapshot "$snapshot_id" --target "$tmp/target-no-confirm" --overwrite >"$tmp/no-confirm.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 2 ]
+grep -q 'SRE_CONFIRM_REQUIRED' "$tmp/no-confirm.out"
+cmp "$tmp/no-confirm.expected" "$tmp/target-no-confirm/nested/data.txt"
+printf 'unrelated target entry\n' >"$tmp/target-clean/unrelated.txt"
 "$bin" restore --store "$tmp/store" --snapshot "$snapshot_id" --target "$tmp/target-clean" --confirm >"$tmp/restore.json"
 cmp "$tmp/source/nested/data.txt" "$tmp/target-clean/nested/data.txt"
 cmp "$tmp/source/nested/back\\slash.txt" "$tmp/target-clean/nested/back\\slash.txt"
 cmp "$tmp/source/nested/한글.txt" "$tmp/target-clean/nested/한글.txt"
 [ ! -e "$tmp/target-clean/external-link" ]
+grep -q 'unrelated target entry' "$tmp/target-clean/unrelated.txt"
 python3 - "$tmp/source/nested/data.txt" "$tmp/target-clean/nested/data.txt" <<'PY'
 import os, stat, sys
 source, restored = (os.stat(path) for path in sys.argv[1:])
 assert stat.S_IMODE(source.st_mode) == stat.S_IMODE(restored.st_mode) == 0o640
+assert source.st_uid == restored.st_uid
+assert source.st_gid == restored.st_gid
 assert source.st_mtime_ns == restored.st_mtime_ns
 PY
 

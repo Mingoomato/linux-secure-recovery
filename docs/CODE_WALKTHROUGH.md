@@ -6,7 +6,7 @@
 
 1. `main` — 인자와 명령 디스패치: `init`, `snapshot`, `list`, `show`, `verify`, `restore`, `prune`, `doctor`.
 2. `canonical_dir`, `StoreLock`, `ensure_store_dirs` — 입력 루트와 저장소 구성, 명령 직렬화.
-3. `open_beneath`, `scan_tree`, `save_blob`, `sha256_fd`, `same_state` — 안전한 열기, 재귀 순회, 콘텐츠 저장과 안정성 확인.
+3. `src/path_safety.hpp`, `open_beneath`, `scan_tree`, `save_blob`, `sha256_fd`, `same_state` — 경로 문법, 안전한 열기, 재귀 순회, 콘텐츠 저장과 안정성 확인.
 4. `open_db`, `manifest_document`, `write_manifest_atomic`, `manifest_matches_db` — DB 스키마와 매니페스트 계약.
 5. `cmd_snapshot`, `cmd_show`, `cmd_verify` — 생성, 조회, 검증.
 6. `ensure_parent`, `restore_one`, `cmd_restore` — 대상 디렉터리 FD 처리와 원자적인 파일 단위 복원.
@@ -15,6 +15,8 @@
 ## snapshot 제어 흐름
 
 `cmd_snapshot`은 먼저 루트 교차 여부와 저장소 잠금을 확인합니다. source root FD를 열고 `COPYING` 상태를 짧은 SQLite 트랜잭션으로 저장합니다. 이후 엔트리 트랜잭션 안에서 `scan_tree`가 항목을 순회합니다. 일반 파일은 `open_beneath`로 열고 `save_blob`가 읽기와 해싱을 수행합니다. 파일의 `dev`, `ino`, `size`, `mtime`이 복사 전후 달라지면 snapshot은 실패합니다.
+
+`cmd_init`은 저장소 경로의 부모를 먼저 canonicalize하고 prospective store와 source의 포함 관계를 검사합니다. 새 저장소가 source 아래라면 디렉터리를 만들기 전에 거부해 source 안에 초기화 부산물이 남지 않게 합니다. mkdir 이후 실제 경로도 다시 확인합니다. `safe_relative_path`는 별도 header의 bounded lexical check이고, 실제 파일 접근의 dirfd/openat2 제약을 대체하지 않습니다.
 
 새 blob은 `temp/<snapshot>-<index>.part`에 `O_EXCL`로 작성됩니다. 파일 `fsync`와 최종 콘텐츠 주소 경로로의 `renameat2(RENAME_NOREPLACE)`, shard 디렉터리 `fsync`가 성공해야 DB 엔트리가 해당 해시를 참조합니다. 이미 존재하는 blob은 symlink를 따르지 않고 일반 파일, 크기, 해시, 안정 상태를 다시 확인합니다.
 
@@ -45,3 +47,5 @@
 `UniqueFd`는 FD를 소유하고 복사가 금지됩니다. `StoreLock`도 내부 FD를 소유해 RAII로 잠금을 풀고 닫습니다. 그 외 `rootfd`, `src`, `dst`, SQLite statement/connection은 함수 안에서 명시적으로 정리하므로 예외가 발생하는 모든 분기에서 소유권을 따라가야 합니다. OpenSSL EVP context 역시 오류 처리와 finalization을 확인합니다.
 
 에러 분석 시 `errno`를 덮어쓰기 전에 저장하고, SQLite 오류는 해당 연결을 닫기 전에 복사하며, `close`, `fsync`, `renameat2` 결과를 구분해 기록하세요. 회귀 검증은 [`tests/smoke.sh`](../tests/smoke.sh)에서 수행합니다. 여기에는 sidecar/blob tamper, metadata, `show`, audit schema, prune 공유 blob, doctor 및 lock wait가 있습니다.
+
+경로 문법 단위/퍼저 검증은 [`tests/path_safety_test.cpp`](../tests/path_safety_test.cpp), [`tests/path_fuzz.cpp`](../tests/path_fuzz.cpp), `SRE_ENABLE_FUZZING` CMake 옵션에서 확인합니다. 이 퍼저는 pure parser의 불변식을 검사하며 실제 syscall 경로나 전체 restore 경쟁을 퍼징하지 않습니다.
