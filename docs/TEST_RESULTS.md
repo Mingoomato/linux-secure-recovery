@@ -6,13 +6,13 @@
 
 | 추적 항목 | 상태 | 근거 |
 |---|---|---|
-| 구현 | PARTIAL | CLI와 주요 저장·검증·복원 흐름 구현. quota, 트리 전체 일관성, crash fault harness 등은 미구현 |
-| 기술 검증 | 이전 revision 로컬 게이트 통과; 현재 변경 revision은 미검증 | directory/exclusion manifest 및 extension filter 추가 후 빌드·테스트·정적 분석을 실행하지 않음 |
+| 구현 | PARTIAL | CLI와 주요 저장·검증·복원 흐름 구현. content-blob quota는 추가됐으나 트리 전체 일관성, crash fault harness 등은 미구현 |
+| 기술 검증 | 이전 revision 로컬 게이트 통과; 현재 변경 revision은 미검증 | directory/exclusion manifest, extension filter, quota 및 restore target recheck 추가 후 빌드·테스트·정적 분석을 실행하지 않음 |
 | 오너 학습/재현 | 미평가 | 독립 과제 수행이나 코드 설명 증거를 아직 받지 않음 |
 
 ## 현재 revision의 구현 변경 후 상태
 
-2026-10-10에 directory path manifest, 지원하지 않는 항목의 명시적 제외 기록, 반복형 extension filter, 파일별 `observed_at_ns` 및 legacy DB migration, directory restore 계획, per-user systemd timer 예시를 추가했습니다. 사용자가 검증을 중단하고 구현을 계속하라고 지시했으므로 이 변경 뒤에는 빌드, CTest, schema validation, analyzer, `git diff --check`를 실행하지 않았습니다. 아래에 적은 통과 결과는 변경 전 revision의 역사적 증거이며 현재 파일의 검증 결과로 해석하면 안 됩니다.
+2026-10-10에 directory path manifest, 지원하지 않는 항목의 명시적 제외 기록, 반복형 extension filter, 파일별 `observed_at_ns` 및 legacy DB migration, directory restore 계획, per-user systemd timer 예시, persistent `--max-store-bytes` content-blob quota, restore 설치 직전 target identity 재확인을 추가했습니다. 사용자가 검증을 중단하고 구현을 계속하라고 지시했으므로 이 변경 뒤에는 빌드, CTest, schema validation, analyzer, `git diff --check`를 실행하지 않았습니다. 아래에 적은 통과 결과는 변경 전 revision의 역사적 증거이며 현재 파일의 검증 결과로 해석하면 안 됩니다.
 
 ## 이전 revision에서 실행한 검증
 
@@ -52,9 +52,9 @@
 - 실제 동시 원본 변경 경합과 snapshot unstable 검출 테스트.
 - SRE-NFR-01의 1,000개/1 GiB 데이터, 처리량/RSS/CPU/중복률 benchmark.
 - 2개 이상 배포판 및 파일시스템/마운트 옵션 조합.
-- quota 지원과 quota/GC 경쟁 검증.
+- 새 content-blob quota의 설정 migration, usage accounting, dedup allowance, 초과 거부 경계 및 quota/GC 경쟁 검증.
 - 타 UID 및 거부되는 `fchown` 권한 경계, ACL/xattr 보존.
-- 계획 이후 overwrite race, 파일 설치 후 재해시, cross-filesystem/특수 파일시스템 제한 테스트.
+- 계획 이후 overwrite race와 새 target identity recheck, 파일 설치 후 재해시, cross-filesystem/특수 파일시스템 제한 테스트. 비교와 rename 사이 외부 writer 경합은 잔여 위험.
 - 10,000-run smoke를 넘는 장시간 fuzzing 캠페인 및 SRS가 요구하는 100개 fault point.
 
 이 범위 때문에 SRS-04 DoD는 충족으로 표시하지 않습니다. CTest, sanitizer, analyzer는 이 문서에 적힌 테스트 범위의 근거이며 사용자 숙련도를 증명하지 않습니다.

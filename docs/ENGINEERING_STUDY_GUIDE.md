@@ -4,7 +4,7 @@
 
 Secure Recovery Engine(SRE)은 변경 전에 사용자가 명시적으로 만든 로컬 파일 스냅샷을 검증하고 복원하는 C++20 학습 프로젝트입니다. `openat2`, 파일 디스크립터 기반 경로 처리, SHA-256, SQLite 상태 관리, `fsync`와 원자적 파일 교체를 통해 Linux 시스템 프로그래밍의 보안 경계를 공부하도록 설계했습니다. 손상 후 만든 백업은 손상 전 데이터를 복구하지 못하며, 이 프로젝트는 실전 랜섬웨어 방어 제품이나 불변 백업이라고 주장하지 않습니다.
 
-구현에는 `init`, `snapshot`, `list`, `show`, `verify`, `restore`, `prune`, `doctor`가 있습니다. 이전 revision에서는 GCC/Clang 빌드, sanitizer, 정적 분석, CTest와 10,000-run path fuzz smoke를 수행했습니다. 현재 revision은 directory manifest, 명시적 제외 항목과 extension filter를 추가했으며 요청에 따라 이 변경 뒤 기술 검증은 실행하지 않았습니다. 구현은 SRS-04 전체 완료가 아닙니다. 전원 손실·실제 강제 종료 매트릭스, 자원 고갈 fault injection, 1 GiB 성능 측정, quota, ACL/xattr, 권한별 소유권 복원, 트리 전체 일관성은 입증되지 않았습니다. 자동화 검증은 소유자의 개인 숙련도 증거가 아닙니다.
+구현에는 `init`, `snapshot`, `list`, `show`, `verify`, `restore`, `prune`, `doctor`가 있습니다. 이전 revision에서는 GCC/Clang 빌드, sanitizer, 정적 분석, CTest와 10,000-run path fuzz smoke를 수행했습니다. 현재 revision은 directory manifest, 명시적 제외 항목, extension filter, persistent content-blob quota와 restore 직전 target identity 재확인을 추가했으며 요청에 따라 이 변경 뒤 기술 검증은 실행하지 않았습니다. 구현은 SRS-04 전체 완료가 아닙니다. 전원 손실·실제 강제 종료 매트릭스, 자원 고갈 fault injection, 1 GiB 성능 측정, quota 경계 행렬, ACL/xattr, 권한별 소유권 복원, 트리 전체 일관성은 입증되지 않았습니다. 자동화 검증은 소유자의 개인 숙련도 증거가 아닙니다.
 
 ## 하위 시스템이 필요한 이유
 
@@ -16,6 +16,7 @@ Secure Recovery Engine(SRE)은 변경 전에 사용자가 명시적으로 만든
 | 경로 제한 | 공격자가 바꿀 수 있는 문자열 경로가 루트 밖으로 나가거나 symlink를 따라가지 않게 함 | `open_beneath`, `openat2` |
 | 안정 파일 읽기와 blob 저장 | 복사 중 변한 파일을 정상 스냅샷으로 기록하지 않고 content hash와 파일별 관측 시각을 기록 | `save_blob`, `sha256_fd`, `same_state`, `Entry::observed_at_ns` |
 | SQLite 메타데이터 | 경로·해시·파일 메타데이터와 스냅샷 상태를 저장 | `open_db`, `scan_tree`, `cmd_snapshot` |
+| blob quota | 저장소별 persistent content-byte 상한을 적용하고 기존 store는 unlimited 기본값으로 유지 | `store_settings`, `configured_blob_quota`, `blob_store_usage`, `save_blob` |
 | 디렉터리와 제외 항목 | 빈 디렉터리를 복원 가능하게 저장하고, 지원하지 않는 항목을 읽지 않은 채 이유와 함께 기록 | `directory_entries`, `excluded_entries`, `scan_tree` |
 | JSON sidecar | DB와 별도로 스냅샷 정보를 내보내고 자체 무결성 해시로 손상 감지 | `manifest_document`, `write_manifest_atomic`, `manifest_matches_db` |
 | 검증과 복원 | 저장 blob을 확인하고 임시 파일을 통해 파일 단위로 교체 | `cmd_verify`, `restore_one`, `cmd_restore` |
@@ -31,18 +32,19 @@ Secure Recovery Engine(SRE)은 변경 전에 사용자가 명시적으로 만든
 3. `scan_tree`는 루트 FD에서 디렉터리를 열거하고 디렉터리 경로를 기록해 빈 폴더도 보존합니다. symlink, 특수 파일, 다른 장치의 항목은 대상 내용을 열지 않고 유형·경로·제외 사유를 기록합니다.
 4. `--exclude-extension`은 일반 파일을 blob으로 읽기 전에 basename 접미사를 ASCII 대소문자 구분 없이 검사합니다. 일치 파일은 manifest 제외 목록에 이유를 기록하고 blob은 만들지 않습니다.
 5. 나머지 일반 파일은 `open_beneath`로 열고, `save_blob`가 복사 전후 `fstat` 상태를 비교하며 읽기와 SHA-256 계산을 동시에 수행합니다. 안정성 확인 직후 wall-clock `observed_at_ns`를 저장합니다. 이 시간은 파일 관측 시각이며 트리 전체의 공통 snapshot 시각이 아닙니다.
-6. blob은 저장소 안의 고유 임시 파일에 기록되고 파일 `fsync`, 같은 파일시스템의 rename, shard 디렉터리 `fsync`를 거친 뒤 DB 행이 참조합니다.
-7. DB 파일·디렉터리·제외 행을 기록한 트랜잭션이 끝난 뒤 versioned JSON sidecar를 원자적으로 설치하고 디렉터리를 동기화합니다. 마지막 DB 트랜잭션이 `VERIFIED`를 `COMMITTED`로 바꿉니다.
-8. `doctor`는 남은 `COPYING`/`VERIFIED`를 `FAILED`로 표시하고, 커밋되지 않은 sidecar와 `.part` 파일을 정리합니다.
+6. 설정된 quota가 있으면 `blob_store_usage`가 `blobs/sha256` 아래의 no-follow 정규 파일 크기를 합산합니다. dedup hit은 기존 blob의 유형·크기·hash·안정성을 확인해 사용량을 늘리지 않습니다. 새 고유 blob은 남은 byte budget을 넘으면 `SRE_STORE_QUOTA_EXCEEDED`로 거부합니다. quota는 blob content만 포함하며 임시 파일·DB/WAL·manifest·audit와 파일시스템 여유 공간을 제한하지 않습니다.
+7. blob은 저장소 안의 고유 임시 파일에 기록되고 파일 `fsync`, 같은 파일시스템의 rename, shard 디렉터리 `fsync`를 거친 뒤 DB 행이 참조합니다.
+8. DB 파일·디렉터리·제외 행을 기록한 트랜잭션이 끝난 뒤 versioned JSON sidecar를 원자적으로 설치하고 디렉터리를 동기화합니다. 마지막 DB 트랜잭션이 `VERIFIED`를 `COMMITTED`로 바꿉니다.
+9. `doctor`는 남은 `COPYING`/`VERIFIED`를 `FAILED`로 표시하고, 커밋되지 않은 sidecar와 `.part` 파일을 정리합니다.
 
 ### 조회·검증·복원·정리
 
 - `show`는 SQLite 스냅샷 행과 파일·디렉터리·제외 항목 집계를 JSON으로 보여 줍니다. `list`는 요약 행을 여러 개 출력합니다.
 - `load_entries`는 SQLite TEXT의 NUL 종료 문자열만 믿지 않고 `sqlite3_column_bytes` 길이로 전체 경로 바이트를 복사한 뒤 helper로 검사합니다. helper는 borrowed `string_view`를 동기 호출 안에서만 사용하므로 수명 연장은 없습니다.
 - `verify`는 DB 엔트리와 매니페스트 sidecar의 정합성을 비교하고 각 blob이 일반 파일인지, 크기와 SHA-256이 맞는지 확인합니다.
-- `restore --dry-run`은 dirfd/no-follow 기준으로 target 부모와 엔트리를 확인하고 파일의 create/preserve/replace/blocked 및 디렉터리 create/preserve 동작을 JSONL로 출력합니다. 계획과 summary는 `restore-plan-v1` schema를 따르며 delete=0, writes_performed=false를 나타냅니다. 계획은 현재 상태의 관찰이므로 나중의 overwrite race를 막는 lock은 아닙니다. 실제 쓰기는 `--confirm`, 기존 파일 교체는 `--overwrite`가 필요합니다.
-- 디렉터리는 경로 순으로 안전하게 만들고, 파일은 `restore_one`이 대상 디렉터리 FD 아래에 임시 파일을 만듭니다. blob을 복사하고 staged 파일의 크기·해시를 검사한 뒤 mode/소유권/mtime을 가능한 범위에서 적용하고 `renameat2`로 파일 하나를 설치합니다. 설치 이름을 `O_NOFOLLOW`로 다시 열어 inode/size/hash를 재확인하고 parent directory를 동기화합니다. Directory mode/owner/timestamp는 저장하지 않습니다.
-- `prune`은 retention 밖의 DB 행을 트랜잭션으로 삭제하고 sidecar를 제거한 후 여전히 참조되지 않는 blob을 수집합니다. 같은 blob을 다른 스냅샷이 참조하면 남깁니다.
+- `restore --dry-run`은 dirfd/no-follow 기준으로 target 부모와 엔트리를 확인하고 파일의 create/preserve/replace/blocked 및 디렉터리 create/preserve 동작을 JSONL로 출력합니다. 계획과 summary는 `restore-plan-v1` schema를 따르며 delete=0, writes_performed=false를 나타냅니다. 실제 복원은 `--confirm`, 기존 파일 교체는 `--overwrite`가 필요합니다.
+- 디렉터리는 경로 순으로 안전하게 만들고, 파일은 `restore_one`이 대상 디렉터리 FD 아래에 임시 파일을 만듭니다. blob을 복사하고 staged 파일의 크기·해시를 검사한 뒤 mode/소유권/mtime을 가능한 범위에서 적용합니다. 설치 직전에 no-follow `fstatat`으로 기존 대상의 `(device,inode,type)`이 처음 관찰한 값과 같은지 확인하고, 달라졌으면 `ESTALE`로 설치를 중단합니다. 이어 `renameat2`로 파일 하나를 설치하고 설치 이름을 `O_NOFOLLOW`로 다시 열어 inode/size/hash를 재확인한 뒤 parent directory를 동기화합니다. 이 재확인은 변경을 발견하는 간격을 줄이지만 검사와 rename 사이 외부 writer 경합을 원자적으로 막지는 않습니다. Directory mode/owner/timestamp는 저장하지 않습니다.
+- `prune`은 retention 밖의 DB 행을 트랜잭션으로 삭제하고 sidecar를 제거한 후 여전히 참조되지 않는 blob을 수집합니다. 같은 blob을 다른 스냅샷이 참조하면 남깁니다. `init --max-store-bytes N`은 final blob namespace의 persistent content byte 상한을 저장하며 `0`은 무제한입니다.
 
 ## 소유권, 수명, 동시성
 

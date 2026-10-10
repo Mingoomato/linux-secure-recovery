@@ -3,7 +3,7 @@
 ## 별도 상태
 
 - 구현 상태: **PARTIAL** — 명령과 핵심 경로는 동작하지만 모든 MUST 요구사항/완료 DoD를 만족하지 않습니다.
-- 기술 검증 상태: **이전 revision 로컬 검증 기록 있음; 현재 변경 revision 미검증** — [`TEST_RESULTS.md`](TEST_RESULTS.md). 사용자 지시에 따라 directory/exclusion 변경 후 검증을 중단했습니다.
+- 기술 검증 상태: **이전 revision 로컬 검증 기록 있음; 현재 변경 revision 미검증** — [`TEST_RESULTS.md`](TEST_RESULTS.md). 사용자 지시에 따라 directory/exclusion, quota, restore identity recheck 변경 후 검증을 중단했습니다.
 - 오너 학습/재현 상태: **미평가** — 독립 구현이나 기술 방어 증거 없음.
 
 | 요구사항 | 구현/증거 | 기술 상태 |
@@ -17,12 +17,12 @@
 | SRE-FR-007 | `COPYING → VERIFIED → COMMITTED`, `doctor` stale-state 회수 | 합성 `COPYING`/`VERIFIED` 회수 확인; 실제 crash 미검증 |
 | SRE-FR-008 | `manifest.v1`, DB와 canonical sidecar 일치 및 해시 | schema·무결성 hash smoke 통과 |
 | SRE-FR-009 | blob hash/크기와 sidecar 정합성 검증 | corrupt blob/manifest 각 restore 거부 확인 |
-| SRE-FR-010 | schema형 JSONL dry-run 계획: 파일 및 디렉터리 생성/보존/교체/차단 및 delete=0 | 기존 파일 계획은 이전 revision에서 smoke/schema 확인; directory plan 구현 추가 후 미검증. 계획 이후 경합과 fault gate도 별도 |
+| SRE-FR-010 | schema형 JSONL dry-run 계획: 파일 및 디렉터리 생성/보존/교체/차단 및 delete=0 | 기존 파일 계획은 이전 revision에서 smoke/schema 확인; directory plan 구현 추가 후 미검증. 실제 설치 직전 대상 identity 재확인도 추가했으나 미검증; 외부 writer와의 마지막 syscall 경합은 남음 |
 | SRE-FR-011 | `--confirm`, `--overwrite`, 기존 파일 기본 보호 | `--overwrite`만 주고 `--confirm`을 생략하면 exit 2이며 기존 sentinel이 그대로임을 smoke로 확인 |
-| SRE-FR-012 | 같은 디렉터리 temp, 해시 확인, `renameat2`, 설치 후 재해시, directory fsync | staged hash 뒤 rename하고 installed path를 nofollow로 다시 열어 inode/size/hash를 확인한 뒤 parent fsync; 이 변경 뒤 fault/경합 시험은 미실행 |
+| SRE-FR-012 | 같은 디렉터리 temp, 해시 확인, `renameat2`, 설치 후 재해시, directory fsync | staged hash와 설치 직전 기존 target identity 재확인 뒤 rename; installed path를 nofollow로 다시 열어 inode/size/hash를 확인한 뒤 parent fsync; 최신 코드의 fault/경합 시험 미실행 |
 | SRE-FR-013 | mode, uid/gid, mtime 복원 시도와 partial 결과 | source와 restore의 mode·uid·gid·mtime equality를 smoke로 확인; 타 UID 소유권 복원 및 권한 실패/partial matrix는 미검증 |
 | SRE-FR-014 | 선택된 경로만 설치하고 unrelated target 삭제 없음 | restore 뒤 manifest 밖 unrelated sentinel이 보존됨을 smoke로 확인 |
-| SRE-FR-015 | retention prune, DB 참조 기반 blob GC, 공유 blob 보존 | shared-blob smoke 통과; quota 미구현 |
+| SRE-FR-015 | retention prune, DB 참조 기반 blob GC, 공유 blob 보존, optional byte quota | shared-blob smoke는 이전 revision에서 통과; persistent `--max-store-bytes` content-blob quota 구현, dedup allowance와 over-limit rejection은 최신 변경으로 미검증 |
 | SRE-FR-016 | 실패 상태·temp 정리, sidecar recovery | synthetic 상태 및 고아 sidecar smoke; crash/ENOSPC/EIO 주입 미실행 |
 | SRE-FR-017 | owner-private NDJSON, operation/count/bytes/confirmed, snapshot excluded_count | 이전 revision audit schema·mode·byte/count 확인; 새 excluded_count field 추가 후 schema validation 미실행. 로그 변조 방지/서명은 없음 |
 | SRE-FR-018 | init/snapshot/list/show/verify/restore/prune/doctor | 각 CLI 구현, snapshot/show smoke; 개별 인자 경계 전체 미검증 |

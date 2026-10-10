@@ -15,9 +15,11 @@ SRE는 명시적으로 만든 사전 snapshot을 우발적인 파일 손상/삭�
 - target 아래의 한 파일씩 설치하고 source에 없는 경로를 삭제하지 않습니다.
 - manifest/blob 손상은 verify와 restore에서 거부합니다.
 - SRE 프로세스끼리 `flock`으로 직렬화하고 operation audit log를 owner-only 모드로 씁니다.
+- 선택적 persistent content-blob byte quota를 적용합니다. 기존 blob namespace를 no-follow로 합산하고, 신규 dedup되지 않는 blob만 budget과 비교합니다.
+- 파일 설치 직전 target의 `(device,inode,type)`을 재확인해 staging 중 감지된 교체를 거부합니다.
 
 ## 신뢰 가정과 제외 위험
 
 Store와 상위 디렉터리는 현재 사용자 소유의 신뢰 경로라고 가정합니다. root나 같은 사용자 권한의 공격자는 blob/DB/log를 바꿀 수 있습니다. 잠금을 무시하는 외부 프로그램은 경합을 만들 수 있습니다. 원본과 백업이 같은 디스크면 해당 디스크 고장에 취약합니다. 감사 로그와 manifest는 서명되지 않습니다.
 
-SRE는 ACL/xattr/hardlink identity, 트리 전체 시점 일관성, quota, 원격 저장, 암호화, root 공격자 방어를 제공하지 않습니다. UID/GID 복원은 권한에 따라 실패할 수 있습니다. Crash durability와 storage fault 처리 주장은 현재 시험하지 않은 범위입니다.
+SRE는 ACL/xattr/hardlink identity, 트리 전체 시점 일관성, 실제 파일시스템 공간 quota, 원격 저장, 암호화, root 공격자 방어를 제공하지 않습니다. 구현된 content-blob cap은 SQLite/WAL, audit, manifest와 transient temp bytes를 제한하지 않습니다. Target identity 재확인과 `renameat2` 사이에는 외부 writer 경합이 남고, advisory lock은 다른 프로세스를 막지 않습니다. UID/GID 복원은 권한에 따라 실패할 수 있습니다. Crash durability와 storage fault 처리 주장은 현재 시험하지 않은 범위입니다.

@@ -59,5 +59,7 @@
 44. 확장자 제외가 대용량 파일 cap보다 앞에서 적용되는 것은 CPU/I/O 비용, 정책 설명, 메타데이터 노출 면에서 어떤 장단점이 있습니까?
 45. `observed_at_ns`는 어떤 clock에서 언제 캡처하며 wall clock 조정 때문에 어떤 해석을 피해야 합니까?
 46. legacy SQLite `entries`에 `observed_at_ns`가 없을 때 migration과 manifest 재생성은 기존 snapshot 검증을 어떻게 보존합니까?
+47. `max_blob_bytes`가 저장소의 어떤 객체만 세며, 초과 store에서도 deduplicated snapshot은 허용하는 이유와 legacy DB의 기본값은 무엇입니까?
+48. 복원 직전 target의 `(device,inode,type)` 재확인이 줄이는 경쟁과 마지막 `fstatat`-`renameat2` 사이에 남는 경합을 설명하세요.
 
 오너의 학습·재현 여부는 별도 추적합니다. 이 문서나 자동화된 테스트 통과만으로 개인 숙련도를 판정하지 않습니다.

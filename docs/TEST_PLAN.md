@@ -1,6 +1,6 @@
 # SRE 검증 계획
 
-현재 revision은 directory/exclusion manifest, extension filter, directory restore plan 변경 후 검증하지 않았습니다. 아래 완료 항목은 변경 전 revision의 기록이며 이번 코드 상태를 통과로 표시하지 않습니다.
+현재 revision은 directory/exclusion manifest, extension filter, directory restore plan, content quota, restore target identity recheck 변경 후 검증하지 않았습니다. 아래 완료 항목은 변경 전 revision의 기록이며 이번 코드 상태를 통과로 표시하지 않습니다.
 
 ## 완료된 로컬 게이트
 
@@ -24,5 +24,7 @@
 6. 1,000개/1 GiB benchmark와 CPU/RSS/I/O/처리량 기록.
 7. 두 배포판, 여러 파일시스템과 마운트 옵션에서 crash/durability 가정을 검증.
 8. fault matrix 결과와 각 SRS MUST의 pass/fail 증거를 문서화.
+9. 새 store quota migration, 기존 usage 계산, 중복 blob 허용, 새 고유 blob의 경계값/초과 거부, legacy store의 unlimited 기본값을 검증.
+10. restore 시작 시 관찰한 target inode가 staged file 설치 직전에 바뀌었을 때 기존/경쟁 파일 보존과 명시적 실패를 검증하고, 검사와 rename 사이에 남는 외부 writer 경합 한계를 기록.
 
 현재 계획의 미실행 항목은 완료된 것으로 보고하지 않습니다. 상세 결과는 [`TEST_RESULTS.md`](TEST_RESULTS.md)에 있습니다.

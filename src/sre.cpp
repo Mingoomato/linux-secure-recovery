@@ -47,6 +47,10 @@ struct Entry {
 struct DirectoryEntry {
     std::string path;
 };
+struct BlobQuota {
+    std::uint64_t limit = 0;
+    std::uint64_t used = 0;
+};
 struct ExcludedEntry {
     std::string path;
     std::string type;
@@ -287,6 +291,7 @@ sqlite3 *open_db(const std::string &store, bool create) {
         "CREATE TABLE IF NOT EXISTS directory_entries(snapshot_id TEXT NOT NULL,relative_path TEXT NOT NULL,"
         " PRIMARY KEY(snapshot_id,relative_path),"
         " FOREIGN KEY(snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE);"
+        "CREATE TABLE IF NOT EXISTS store_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);"
         "CREATE TABLE IF NOT EXISTS excluded_entries(snapshot_id TEXT NOT NULL,relative_path TEXT NOT NULL,"
         " type TEXT NOT NULL CHECK(type IN ('symlink','block_device','character_device','socket','fifo','file','directory','other')) ,"
         " reason TEXT NOT NULL CHECK(reason IN ('unsupported_type','different_device','extension_excluded')) ,"
@@ -322,6 +327,57 @@ sqlite3 *open_db(const std::string &store, bool create) {
     return db;
 }
 
+std::uint64_t parse_u64_decimal(const std::string &text, const std::string &field) {
+    if (text.empty()) throw std::runtime_error(field + " must be an unsigned decimal integer");
+    std::uint64_t value = 0;
+    for (const unsigned char c : text) {
+        if (c < '0' || c > '9')
+            throw std::runtime_error(field + " must be an unsigned decimal integer");
+        const std::uint64_t digit = c - '0';
+        if (value > (UINT64_MAX - digit) / 10U)
+            throw std::runtime_error(field + " exceeds the supported integer range");
+        value = value * 10U + digit;
+    }
+    return value;
+}
+
+std::uint64_t configured_blob_quota(sqlite3 *db) {
+    sqlite3_stmt *stmt = nullptr;
+    sql_check(sqlite3_prepare_v2(db,
+        "SELECT value FROM store_settings WHERE key='max_blob_bytes'", -1, &stmt, nullptr),
+        db, "prepare blob quota lookup");
+    const int rc = sqlite3_step(stmt);
+    std::uint64_t result = 0;
+    if (rc == SQLITE_ROW) {
+        const auto *text = sqlite3_column_text(stmt, 0);
+        if (!text) {
+            sqlite3_finalize(stmt);
+            throw std::runtime_error("invalid persisted blob quota");
+        }
+        const std::string value(reinterpret_cast<const char *>(text));
+        sqlite3_finalize(stmt);
+        return parse_u64_decimal(value, "persisted blob quota");
+    } else if (rc != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        sql_check(rc, db, "read blob quota");
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+void set_configured_blob_quota(sqlite3 *db, std::uint64_t quota) {
+    const std::string value = std::to_string(quota);
+    sqlite3_stmt *stmt = nullptr;
+    sql_check(sqlite3_prepare_v2(db,
+        "INSERT INTO store_settings(key,value) VALUES('max_blob_bytes',?1) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value", -1, &stmt, nullptr),
+        db, "prepare blob quota update");
+    sqlite3_bind_text(stmt, 1, value.c_str(), -1, SQLITE_TRANSIENT);
+    const int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    sql_check(rc, db, "save blob quota");
+}
+
 void ensure_store_dirs(const std::string &store) {
     for (const char *name : {"blobs", "temp", "manifests", "audit"}) {
         std::string p = store + "/" + name;
@@ -340,6 +396,76 @@ void ensure_store_dirs(const std::string &store) {
         throw std::runtime_error("blob hash component must be a real directory");
     (void)chmod(hash_root.c_str(), 0700);
     (void)chmod(store.c_str(), 0700);
+}
+
+std::uint64_t blob_store_usage(const std::string &store) {
+    const std::string root_path = store + "/blobs/sha256";
+    int rootfd = open(root_path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (rootfd < 0) throw std::runtime_error("cannot open blob namespace for quota accounting");
+    const int root_copy = dup(rootfd);
+    DIR *root_dir = root_copy >= 0 ? fdopendir(root_copy) : nullptr;
+    if (!root_dir) {
+        if (root_copy >= 0) close(root_copy);
+        close(rootfd);
+        throw std::runtime_error("cannot enumerate blob namespace for quota accounting");
+    }
+    std::uint64_t total = 0;
+    std::string failure;
+    errno = 0;
+    while (dirent *shard_entry = readdir(root_dir)) {
+        const std::string shard_name(shard_entry->d_name);
+        if (shard_name == "." || shard_name == "..") continue;
+        struct stat shard_stat {};
+        if (fstatat(rootfd, shard_name.c_str(), &shard_stat, AT_SYMLINK_NOFOLLOW) != 0 ||
+            !S_ISDIR(shard_stat.st_mode)) {
+            failure = "unexpected entry in blob namespace";
+            break;
+        }
+        int shardfd = openat(rootfd, shard_name.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (shardfd < 0) {
+            failure = "cannot open blob shard for quota accounting";
+            break;
+        }
+        const int shard_copy = dup(shardfd);
+        DIR *shard_dir = shard_copy >= 0 ? fdopendir(shard_copy) : nullptr;
+        if (!shard_dir) {
+            if (shard_copy >= 0) close(shard_copy);
+            close(shardfd);
+            failure = "cannot enumerate blob shard for quota accounting";
+            break;
+        }
+        errno = 0;
+        while (dirent *blob_entry = readdir(shard_dir)) {
+            const std::string blob_name(blob_entry->d_name);
+            if (blob_name == "." || blob_name == "..") continue;
+            struct stat blob_stat {};
+            if (fstatat(shardfd, blob_name.c_str(), &blob_stat, AT_SYMLINK_NOFOLLOW) != 0 ||
+                !S_ISREG(blob_stat.st_mode) || blob_stat.st_size < 0) {
+                failure = "unexpected non-regular object in blob shard";
+                break;
+            }
+            const auto size = static_cast<std::uint64_t>(blob_stat.st_size);
+            if (size > UINT64_MAX - total) {
+                failure = "blob namespace size overflow";
+                break;
+            }
+            total += size;
+            errno = 0;
+        }
+        const int shard_read_error = errno;
+        closedir(shard_dir);
+        close(shardfd);
+        if (failure.empty() && shard_read_error != 0)
+            failure = "cannot finish enumerating blob shard";
+        if (!failure.empty()) break;
+        errno = 0;
+    }
+    const int root_read_error = errno;
+    closedir(root_dir);
+    close(rootfd);
+    if (failure.empty() && root_read_error != 0) failure = "cannot finish enumerating blob namespace";
+    if (!failure.empty()) throw std::runtime_error(failure);
+    return total;
 }
 
 class StoreLock {
@@ -393,13 +519,48 @@ private:
 };
 
 void save_blob(int rootfd, const std::string &store, const std::string &snapshot,
-               const std::string &relative, Entry &entry, unsigned index) {
+               const std::string &relative, Entry &entry, unsigned index, BlobQuota &quota) {
     int src = open_beneath(rootfd, relative, O_RDONLY | O_NOFOLLOW);
     if (src < 0) throw std::runtime_error("openat2 rejected source " + relative + ": " + strerror(errno));
     struct stat before {}, after {};
     if (fstat(src, &before) != 0 || !S_ISREG(before.st_mode) || before.st_size < 0 ||
         static_cast<std::uint64_t>(before.st_size) > kMaxFileBytes) {
         close(src); throw std::runtime_error("unsupported source file: " + relative);
+    }
+    const std::uint64_t initial_size = static_cast<std::uint64_t>(before.st_size);
+    const bool exceeds_quota = quota.limit != 0U &&
+        (quota.used > quota.limit || initial_size > quota.limit - quota.used);
+    if (exceeds_quota) {
+        try {
+            entry.hash = sha256_fd(src);
+            if (fstat(src, &after) != 0 || !same_state(before, after))
+                throw std::runtime_error("SNAPSHOT_UNSTABLE: " + relative);
+            entry.size = initial_size;
+            entry.mode = static_cast<std::uint32_t>(before.st_mode & 0777);
+            entry.uid = static_cast<std::uint32_t>(before.st_uid);
+            entry.gid = static_cast<std::uint32_t>(before.st_gid);
+            entry.mtime_ns = mtime_ns(before);
+            entry.observed_at_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            const std::string final = store + "/blobs/sha256/" + entry.hash.substr(0, 2) + "/" + entry.hash;
+            UniqueFd existing(open(final.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+            if (existing.get() >= 0) {
+                struct stat existing_before {}, existing_after {};
+                if (fstat(existing.get(), &existing_before) != 0 || !S_ISREG(existing_before.st_mode) ||
+                    existing_before.st_size < 0 || static_cast<std::uint64_t>(existing_before.st_size) != entry.size ||
+                    sha256_fd(existing.get()) != entry.hash || fstat(existing.get(), &existing_after) != 0 ||
+                    !same_state(existing_before, existing_after))
+                    throw std::runtime_error("SRE_BAD_HASH: existing content-addressed blob is corrupt");
+                close(src);
+                return;
+            }
+            if (errno != ENOENT)
+                throw std::runtime_error("cannot safely inspect existing content-addressed blob");
+            throw std::runtime_error("SRE_STORE_QUOTA_EXCEEDED: new blob would exceed configured content quota");
+        } catch (...) {
+            close(src);
+            throw;
+        }
     }
     std::string temp = store + "/temp/" + snapshot + "-" + std::to_string(index) + ".part";
     int dst = open(temp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
@@ -472,6 +633,11 @@ void save_blob(int rootfd, const std::string &store, const std::string &snapshot
         }
         if (unlink(temp.c_str()) != 0) throw std::runtime_error("cannot remove duplicate blob temporary file");
     } else if (errno == ENOENT) {
+        if (quota.limit != 0U &&
+            (quota.used > quota.limit || entry.size > quota.limit - quota.used)) {
+            unlink(temp.c_str());
+            throw std::runtime_error("SRE_STORE_QUOTA_EXCEEDED: new blob would exceed configured content quota");
+        }
         if (rename(temp.c_str(), final.c_str()) != 0) { unlink(temp.c_str()); throw std::runtime_error("blob rename failed"); }
         int dfd = open(shard.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
         if (dfd < 0 || fsync(dfd) != 0) {
@@ -479,6 +645,7 @@ void save_blob(int rootfd, const std::string &store, const std::string &snapshot
             throw std::runtime_error("blob directory fsync failed");
         }
         close(dfd);
+        if (quota.limit != 0U) quota.used += entry.size;
     } else { unlink(temp.c_str()); throw std::runtime_error("cannot safely inspect existing content-addressed blob"); }
 }
 
@@ -488,6 +655,7 @@ void scan_tree(int rootfd, int currentfd, const std::string &prefix,
                std::vector<ExcludedEntry> &excluded_entries, sqlite3 *db,
                const std::string &snapshot, const std::string &store,
                const std::vector<std::string> &excluded_extensions, unsigned &counter,
+               BlobQuota &quota,
                unsigned depth = 0) {
     if (depth > 128U) throw std::runtime_error("directory depth limit exceeded");
     int dupfd = dup(currentfd);
@@ -547,8 +715,8 @@ void scan_tree(int rootfd, int currentfd, const std::string &prefix,
                     opened_directory.st_dev != st.st_dev || opened_directory.st_ino != st.st_ino)
                     throw std::runtime_error("SNAPSHOT_UNSTABLE: directory changed during traversal: " + rel);
                 scan_tree(rootfd, child.get(), rel, rootdev, entries, directories,
-                          excluded_entries, db, snapshot, store, excluded_extensions,
-                          counter, depth + 1U);
+                        excluded_entries, db, snapshot, store, excluded_extensions,
+                          counter, quota, depth + 1U);
             } else if (S_ISREG(st.st_mode)) {
                 if (matches_excluded_extension(rel, excluded_extensions)) {
                     ExcludedEntry excluded {rel, "file", "extension_excluded"};
@@ -568,7 +736,7 @@ void scan_tree(int rootfd, int currentfd, const std::string &prefix,
                     continue;
                 }
                 Entry e; e.path = rel;
-                save_blob(rootfd, store, snapshot, rel, e, counter++);
+                save_blob(rootfd, store, snapshot, rel, e, counter++, quota);
                 sqlite3_stmt *stmt = nullptr;
                 sql_check(sqlite3_prepare_v2(db,
                     "INSERT INTO entries(snapshot_id,relative_path,type,size,sha256,mode,uid,gid,mtime_ns,stable,observed_at_ns)"
@@ -897,6 +1065,11 @@ std::uint64_t total_bytes(const std::vector<Entry> &entries) {
 }
 
 int cmd_init(int argc, char **argv) {
+    const auto quota_args = get_multi_args(argc, argv, "--max-store-bytes");
+    if (quota_args.size() > 1U) throw std::runtime_error("--max-store-bytes may be specified once");
+    const bool update_quota = !quota_args.empty();
+    const std::uint64_t requested_quota = update_quota ?
+        parse_u64_decimal(quota_args.front(), "--max-store-bytes") : 0U;
     std::string source = canonical_dir(get_arg(argc, argv, "--source"));
     std::string store_path = get_arg(argc, argv, "--store");
     if (store_path.empty()) throw std::runtime_error("init requires --source and --store");
@@ -931,9 +1104,13 @@ int cmd_init(int argc, char **argv) {
                        -1, &stmt, nullptr);
     sqlite3_bind_text(stmt, 1, source.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(std::time(nullptr)));
-    int rc = sqlite3_step(stmt); sqlite3_finalize(stmt); sqlite3_close(db);
+    int rc = sqlite3_step(stmt); sqlite3_finalize(stmt);
+    if (rc == SQLITE_DONE && update_quota) set_configured_blob_quota(db, requested_quota);
+    const std::uint64_t active_quota = rc == SQLITE_DONE ? configured_blob_quota(db) : 0U;
+    sqlite3_close(db);
     if (rc != SQLITE_DONE) throw std::runtime_error("cannot initialize store metadata");
-    std::cout << "store initialized\n";
+    std::cout << "store initialized max_blob_bytes=" << active_quota
+              << (active_quota == 0U ? " (unlimited)\n" : "\n");
     return 0;
 }
 
@@ -956,7 +1133,10 @@ int cmd_snapshot(int argc, char **argv) {
     bool entry_transaction_open = false;
     bool manifest_written = false;
     bool committed = false;
+    BlobQuota quota;
     try {
+        quota.limit = configured_blob_quota(db);
+        if (quota.limit != 0U) quota.used = blob_store_usage(store);
         exec_sql(db, "BEGIN IMMEDIATE", "begin COPYING transaction");
         sql_check(sqlite3_prepare_v2(db,
             "INSERT INTO snapshots(id,source_root,created_at,state) VALUES(?1,?2,?3,'COPYING')",
@@ -976,7 +1156,7 @@ int cmd_snapshot(int argc, char **argv) {
         std::vector<ExcludedEntry> excluded_entries;
         unsigned counter = 0;
         scan_tree(rootfd, rootfd, "", rootst.st_dev, entries, directories,
-                  excluded_entries, db, id, store, excluded_extensions, counter);
+                  excluded_entries, db, id, store, excluded_extensions, counter, quota);
         sql_check(sqlite3_prepare_v2(db,
             "UPDATE snapshots SET state='VERIFIED',incomplete_count=0 WHERE id=?1 AND state='COPYING'",
             -1, &stmt, nullptr), db, "prepare VERIFIED update");
@@ -1010,7 +1190,9 @@ int cmd_snapshot(int argc, char **argv) {
         close(rootfd); sqlite3_close(db);
         std::cout << id << " files=" << entries.size()
                   << " directories=" << directories.size()
-                  << " excluded=" << excluded_entries.size() << '\n';
+                  << " excluded=" << excluded_entries.size()
+                  << " blob_bytes=" << quota.used
+                  << " max_blob_bytes=" << quota.limit << '\n';
         return 0;
     } catch (...) {
         if (stmt) sqlite3_finalize(stmt);
@@ -1363,6 +1545,8 @@ int restore_one(int targetfd, const std::string &store, const Entry &e, bool ove
         close(dirfd); errno = EEXIST; return 1;
     }
     if (stat_rc != 0 && errno != ENOENT) { close(dirfd); return -1; }
+    const bool target_existed = stat_rc == 0;
+    if (target_existed && S_ISDIR(existing.st_mode)) { close(dirfd); errno = EISDIR; return -1; }
     std::string blob = blob_path(store, e.hash);
     int src = open(blob.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (src < 0) { close(dirfd); return -1; }
@@ -1413,6 +1597,19 @@ int restore_one(int targetfd, const std::string &store, const Entry &e, bool ove
     struct stat staged_stat {};
     if (fstat(staged_fd, &staged_stat) != 0 || !S_ISREG(staged_stat.st_mode)) {
         close(staged_fd); unlinkat(dirfd, temp.c_str(), 0); close(dirfd); errno = EIO; return -1;
+    }
+    struct stat current_target {};
+    const int current_rc = fstatat(dirfd, name.c_str(), &current_target, AT_SYMLINK_NOFOLLOW);
+    const bool target_unchanged = target_existed ?
+        (current_rc == 0 && current_target.st_dev == existing.st_dev &&
+         current_target.st_ino == existing.st_ino &&
+         (current_target.st_mode & S_IFMT) == (existing.st_mode & S_IFMT)) :
+        (current_rc != 0 && errno == ENOENT);
+    if (!target_unchanged) {
+        const int saved = target_existed ? ESTALE : (current_rc == 0 ? EEXIST : errno);
+        close(staged_fd); unlinkat(dirfd, temp.c_str(), 0); close(dirfd);
+        errno = saved;
+        return -1;
     }
     unsigned int flags = overwrite ? 0U : RENAME_NOREPLACE;
     int rc = static_cast<int>(syscall(SYS_renameat2, dirfd, temp.c_str(), dirfd, name.c_str(), flags));
@@ -1723,8 +1920,8 @@ int cmd_doctor(const std::string &store) {
 int main(int argc, char **argv) {
     try {
         if (argc < 2 || std::string(argv[1]) == "--help") {
-            std::cout << "sre init --source DIR --store DIR\n"
-                         "sre snapshot --source DIR --store DIR [--label TEXT]\n"
+            std::cout << "sre init --source DIR --store DIR [--max-store-bytes N]\n"
+                         "sre snapshot --source DIR --store DIR [--exclude-extension EXT]\n"
                          "sre list --store DIR\nsre show --store DIR --snapshot ID\n"
                          "sre verify --store DIR --snapshot ID\n"
                          "sre restore --store DIR --snapshot ID --target DIR --dry-run|--confirm [--overwrite]\n"

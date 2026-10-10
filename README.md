@@ -12,6 +12,7 @@ SRE는 사용자가 변경 전에 만든 로컬 파일 snapshot을 보관하고,
 
 - 명령: `init`, `snapshot`, `list`, `show`, `verify`, `restore`, `prune`, `doctor`
 - Snapshot은 일반 파일, 디렉터리 트리와 빈 디렉터리를 기록합니다. symlink, 장치, socket, FIFO, 다른 device의 항목은 파일 내용을 따라가지 않고 경로·유형·제외 사유만 기록합니다. 반복 가능한 `--exclude-extension .tmp` 옵션은 basename 끝부분을 대소문자 구분 없이 비교해 파일을 제외하고 manifest에 이유를 남깁니다. 파일 크기 상한은 1 GiB이고 JSON 경로 계약에 맞지 않는 invalid UTF-8 파일 이름은 snapshot 실패로 처리합니다.
+- `init --max-store-bytes N`은 content-addressed blob 데이터에 대한 저장소별 상한을 설정합니다. 중복 blob은 다시 계산하지 않으며, 상한을 넘길 새 고유 blob은 `SRE_STORE_QUOTA_EXCEEDED`로 거부됩니다. `0`은 무제한입니다. 이 상한은 DB/WAL, audit, manifest, 임시 파일이나 파일시스템 여유 공간을 제한하지 않습니다.
 - `restore --dry-run`은 파일의 생성·기존 대상 보존·교체·차단과 디렉터리 생성·보존 계획을 JSON Lines로 출력합니다. dry-run은 target을 쓰거나 삭제하지 않습니다. 실제 쓰기에는 `--confirm`, 기존 파일 교체에는 추가로 `--overwrite`가 필요합니다. 계획은 현재 시점의 관찰이므로 실제 복원에서는 경합·권한·저장소 오류가 별도로 발생할 수 있습니다.
 - 일반 파일마다 mode, uid/gid, mtime_ns, 관측 시각을 저장합니다. 복원 시 mode와 mtime을 적용하며, uid/gid 적용 권한이 없으면 부분 메타데이터 상태를 보고합니다. 디렉터리는 경로와 빈 디렉터리 복원 정보만 저장합니다.
 - 파일 복원은 설치 전에 staged bytes를 확인하고, 원자적 rename 뒤 installed path의 inode·크기·SHA-256을 다시 확인합니다. 사후 확인이나 디렉터리 동기화 실패는 이미 설치된 파일을 자동으로 되돌리지 않습니다.
@@ -28,7 +29,7 @@ python3 -m pip install -r requirements-test.txt
 ctest --test-dir build --output-on-failure
 
 mkdir -p "$HOME/recovery-lab" "$HOME/.local/share/sre-store" "$HOME/recovery-target"
-./build/sre init --source "$HOME/recovery-lab" --store "$HOME/.local/share/sre-store"
+./build/sre init --source "$HOME/recovery-lab" --store "$HOME/.local/share/sre-store" --max-store-bytes 10737418240
 ./build/sre snapshot --source "$HOME/recovery-lab" --store "$HOME/.local/share/sre-store" --exclude-extension .tmp --exclude-extension .cache
 ./build/sre list --store "$HOME/.local/share/sre-store"
 ./build/sre show --store "$HOME/.local/share/sre-store" --snapshot SNAPSHOT_ID
@@ -37,9 +38,11 @@ mkdir -p "$HOME/recovery-lab" "$HOME/.local/share/sre-store" "$HOME/recovery-tar
 ./build/sre restore --store "$HOME/.local/share/sre-store" --snapshot SNAPSHOT_ID --target "$HOME/recovery-target" --confirm
 ```
 
+저장소 상한은 `metadata.sqlite`에 저장됩니다. 기존 저장소에서 바꾸려면 같은 `--source`/`--store`로 `init --max-store-bytes N`을 다시 실행하세요. 현재 사용량보다 낮게 설정하면 기존 데이터와 dedup snapshot은 유지되고, 새 고유 blob 추가만 차단됩니다.
+
 ### 검증과 현재 한계
 
-이전 구현 revision에서는 GCC/Clang 빌드, 정적 분석, sanitizer, fuzz smoke와 CTest를 수행했습니다. 현재 revision에는 디렉터리/제외 항목 manifest, 확장자 필터, 파일별 `observed_at_ns`와 DB migration 변경이 추가됐으며, 요청에 따라 이 변경 뒤에는 빌드·테스트·정적 분석을 실행하지 않았습니다. 따라서 현재 변경 사항의 기술 검증 상태는 미확인입니다. 이전 증거와 적용 범위는 [`docs/TEST_RESULTS.md`](docs/TEST_RESULTS.md)에 분리해 기록합니다.
+이전 구현 revision에서는 GCC/Clang 빌드, 정적 분석, sanitizer, fuzz smoke와 CTest를 수행했습니다. 현재 revision에는 디렉터리/제외 항목 manifest, 확장자 필터, 파일별 `observed_at_ns`와 DB migration, content blob 상한, 복원 직전 대상 identity 재확인이 추가됐으며, 요청에 따라 이 변경 뒤에는 빌드·테스트·정적 분석을 실행하지 않았습니다. 따라서 현재 변경 사항의 기술 검증 상태는 미확인입니다. 이전 증거와 적용 범위는 [`docs/TEST_RESULTS.md`](docs/TEST_RESULTS.md)에 분리해 기록합니다.
 
 사용자별 일일 실행 예시는 [`docs/systemd/sre-snapshot.service`](docs/systemd/sre-snapshot.service)와 [`docs/systemd/sre-snapshot.timer`](docs/systemd/sre-snapshot.timer)에 있습니다. `%h` 경로와 실행 파일 경로를 환경에 맞게 수정한 뒤 `systemctl --user enable --now sre-snapshot.timer`로 활성화합니다.
 
@@ -59,6 +62,7 @@ SRE is an educational Linux project for storing user-created local snapshots mad
 
 - Commands: `init`, `snapshot`, `list`, `show`, `verify`, `restore`, `prune`, and `doctor`.
 - Snapshots record regular files, the directory tree, and empty directories. Symlinks, devices, sockets, FIFOs, and entries on another device are recorded by path, type, and exclusion reason without following or backing up their contents. Repeatable `--exclude-extension .tmp` filters compare case-insensitive basename suffixes and record excluded files in the manifest. The per-file limit is 1 GiB; invalid UTF-8 names fail the snapshot because they cannot be represented by this JSON path contract.
+- `init --max-store-bytes N` sets a per-store cap for content-addressed blob bytes. Deduplicated blobs do not consume the quota again; a new unique blob that would exceed the cap fails with `SRE_STORE_QUOTA_EXCEEDED`. `0` means unlimited. The cap excludes SQLite/WAL, audit, manifest, temporary-file space, and filesystem free-space guarantees.
 - `restore --dry-run` emits JSON Lines plans for file create/preserve/replace/block actions and directory create/preserve actions. It does not write or delete target files. Writes require `--confirm`; replacing existing files also requires `--overwrite`.
 - Regular files store mode, uid/gid, mtime_ns, and observation time. Restore applies mode and mtime; unavailable uid/gid privileges are reported as partial metadata restoration. Directories store paths for empty-directory restoration, without directory metadata.
 - File restore checks staged bytes and reopens the installed path after atomic rename to check inode, size, and SHA-256. A post-install or directory-sync error does not automatically roll back the installed name.
@@ -75,7 +79,7 @@ python3 -m pip install -r requirements-test.txt
 ctest --test-dir build --output-on-failure
 
 mkdir -p "$HOME/recovery-lab" "$HOME/.local/share/sre-store" "$HOME/recovery-target"
-./build/sre init --source "$HOME/recovery-lab" --store "$HOME/.local/share/sre-store"
+./build/sre init --source "$HOME/recovery-lab" --store "$HOME/.local/share/sre-store" --max-store-bytes 10737418240
 ./build/sre snapshot --source "$HOME/recovery-lab" --store "$HOME/.local/share/sre-store" --exclude-extension .tmp --exclude-extension .cache
 ./build/sre list --store "$HOME/.local/share/sre-store"
 ./build/sre show --store "$HOME/.local/share/sre-store" --snapshot SNAPSHOT_ID
@@ -84,9 +88,11 @@ mkdir -p "$HOME/recovery-lab" "$HOME/.local/share/sre-store" "$HOME/recovery-tar
 ./build/sre restore --store "$HOME/.local/share/sre-store" --snapshot SNAPSHOT_ID --target "$HOME/recovery-target" --confirm
 ```
 
+The configured cap is persisted in `metadata.sqlite`. To change it on an existing store, rerun `init --max-store-bytes N` with the same source and store. Setting it below current usage preserves existing data and deduplicated snapshots while rejecting new unique blobs.
+
 ### Verification and limitations
 
-Earlier revisions passed GCC/Clang builds, static analysis, sanitizer, fuzz smoke, and local CTest. This revision adds directory/exclusion manifest records, extension filters, per-file `observed_at_ns`, and a database migration; per the user's instruction, no build, test, or static analysis was run after those edits. The current changes are therefore technically unverified. Earlier evidence and its scope are separated in [`docs/TEST_RESULTS.md`](docs/TEST_RESULTS.md).
+Earlier revisions passed GCC/Clang builds, static analysis, sanitizer, fuzz smoke, and local CTest. This revision adds directory/exclusion manifest records, extension filters, per-file `observed_at_ns`, a database migration, a content-blob quota, and a pre-install target identity recheck; per the user's instruction, no build, test, or static analysis was run after those edits. The current changes are therefore technically unverified. Earlier evidence and its scope are separated in [`docs/TEST_RESULTS.md`](docs/TEST_RESULTS.md).
 
 A per-user daily timer example is in [`docs/systemd/sre-snapshot.service`](docs/systemd/sre-snapshot.service) and [`docs/systemd/sre-snapshot.timer`](docs/systemd/sre-snapshot.timer). Adjust the `%h` paths and binary path, then enable it with `systemctl --user enable --now sre-snapshot.timer`.
 

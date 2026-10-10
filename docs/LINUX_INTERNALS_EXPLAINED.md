@@ -22,7 +22,7 @@
 
 새 blob은 전용 temp 디렉터리에 `O_CREAT|O_EXCL|O_NOFOLLOW`로 만듭니다. `write`는 짧게 쓰거나 `EINTR`로 실패할 수 있으므로 `write_all`이 진행 상태를 추적합니다. 파일에 `fsync`를 수행한 뒤 rename하고 상위 shard 디렉터리도 `fsync`합니다. 파일 `fsync`는 내용과 inode 메타데이터를 저장 장치 계층으로 밀어내고, 디렉터리 `fsync`는 새 이름의 디렉터리 엔트리를 내구성 있게 기록하는 데 필요합니다. 실제 보장은 파일시스템, 마운트 옵션, 장치 캐시와 커널에 따라 달라 실제 전원 장애 검증 없이는 확정할 수 없습니다.
 
-복원은 대상과 같은 디렉터리에 임시 파일을 만들기 때문에 `renameat2`가 같은 파일시스템 안에서 하나의 이름 변경을 원자적으로 수행할 수 있습니다. `RENAME_NOREPLACE`는 덮어쓰기를 허용하지 않는 모드에서 마지막 경합을 방어합니다. `--overwrite`는 기존 대상 이름을 교체할 수 있습니다. 원자성은 파일 하나에만 해당하고 여러 파일을 하나의 트랜잭션으로 만들지 않습니다.
+복원은 대상과 같은 디렉터리에 임시 파일을 만들기 때문에 `renameat2`가 같은 파일시스템 안에서 하나의 이름 변경을 원자적으로 수행할 수 있습니다. `RENAME_NOREPLACE`는 덮어쓰기를 허용하지 않는 모드에서 최종 이름 충돌을 거부합니다. `--overwrite`에서는 설치 직전 `fstatat(..., AT_SYMLINK_NOFOLLOW)`의 `(device,inode,type)`을 처음 본 값과 비교하고 차이가 나면 멈춥니다. 이 비교와 rename은 하나의 조건부 커널 연산이 아니므로 마지막 syscall 사이의 외부 변경은 남습니다. 원자성은 파일 하나에만 해당하고 여러 파일을 하나의 트랜잭션으로 만들지 않습니다.
 
 rename 이후에도 새 경로를 `openat(O_NOFOLLOW)`로 다시 열어 설치된 inode, 크기, SHA-256을 확인합니다. `fstat` 전후 안정성 확인은 해시 계산 중 같은 열린 inode의 변화를 찾고, `fstatat(..., AT_SYMLINK_NOFOLLOW)`는 검사 끝에 해당 이름이 여전히 같은 inode를 가리키는지 확인합니다. 이 검사 또는 directory `fsync`가 실패하면 이미 파일 이름 교체가 일어난 뒤일 수 있으므로 오류 결과가 자동 rollback을 뜻하지 않습니다.
 
@@ -35,6 +35,8 @@ rename 이후에도 새 경로를 `openat(O_NOFOLLOW)`로 다시 열어 설치�
 연결은 WAL과 `synchronous=FULL`을 설정하고 외래 키를 활성화합니다. Snapshot 상태는 `COPYING → VERIFIED → COMMITTED`로 진행합니다. SQLite transaction은 SQLite DB 안의 행을 원자적으로 다루지만 blob 파일과 JSON sidecar를 함께 묶는 분산 트랜잭션은 아닙니다. 코드의 순서와 `doctor` 복구 규칙은 상태를 해석하기 위한 것이며, crash/power-loss 매트릭스로 검증된 보장은 아닙니다.
 
 `prune`은 먼저 DB에서 오래된 snapshot 참조를 commit한 뒤 sidecar를 지우고, 살아 있는 엔트리들이 참조하는 blob 목록을 만든 뒤 GC를 수행합니다. 중단 지점에 따라 orphan sidecar나 blob이 남을 수 있습니다. 먼저 파일을 삭제하고 DB transaction을 되돌리는 경우에는 반대로 DB가 가리키는 sidecar가 없어질 수 있으므로 순서가 중요합니다.
+
+`init --max-store-bytes N`은 quota 값을 `store_settings`에 decimal text로 저장해 SQLite signed-integer 범위에 묶이지 않게 합니다. Snapshot은 store lock 아래에서 `fdopendir(dup(dirfd))`와 `fstatat(..., AT_SYMLINK_NOFOLLOW)`로 `blobs/sha256`을 합산합니다. quota는 final blob 객체의 논리 크기만 세며 WAL, 임시 복사본, audit/manifest와 파일시스템 할당 블록을 세지 않습니다. 상한 초과 가능성이 있는 파일은 먼저 hash를 계산해 이미 존재하는 dedup blob인지 확인하고, 새 blob이면 temp를 만들기 전에 거부합니다.
 
 ## advisory lock과 동시성
 
@@ -55,7 +57,7 @@ rename 이후에도 새 경로를 `openat(O_NOFOLLOW)`로 다시 열어 설치�
 ## 공식 문서
 
 - [`openat2(2)`](https://man7.org/linux/man-pages/man2/openat2.2.html), [`openat(2)`](https://man7.org/linux/man-pages/man2/openat.2.html), [`path_resolution(7)`](https://man7.org/linux/man-pages/man7/path_resolution.7.html)
-- [`fsync(2)`](https://man7.org/linux/man-pages/man2/fsync.2.html), [`rename(2)`](https://man7.org/linux/man-pages/man2/rename.2.html), [`flock(2)`](https://man7.org/linux/man-pages/man2/flock.2.html), [`stat(2)`](https://man7.org/linux/man-pages/man2/stat.2.html), [`utimensat(2)`](https://man7.org/linux/man-pages/man2/utimensat.2.html)
+- [`fsync(2)`](https://man7.org/linux/man-pages/man2/fsync.2.html), [`rename(2)`](https://man7.org/linux/man-pages/man2/rename.2.html), [`flock(2)`](https://man7.org/linux/man-pages/man2/flock.2.html), [`stat(2)`](https://man7.org/linux/man-pages/man2/stat.2.html), [`utimensat(2)`](https://man7.org/linux/man-pages/man2/utimensat.2.html), [`fdopendir(3)`](https://man7.org/linux/man-pages/man3/fdopendir.3.html), [`readdir(3)`](https://man7.org/linux/man-pages/man3/readdir.3.html)
 - [SQLite WAL](https://www.sqlite.org/wal.html), [SQLite Atomic Commit](https://www.sqlite.org/atomiccommit.html), [SQLite foreign keys](https://www.sqlite.org/foreignkeys.html)
 - [OpenSSL EVP digest API](https://docs.openssl.org/3.0/man3/EVP_DigestInit/)
 - [LLVM libFuzzer](https://llvm.org/docs/LibFuzzer.html)

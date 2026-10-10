@@ -14,7 +14,7 @@
 
 ## snapshot 제어 흐름
 
-`cmd_snapshot`은 먼저 반복형 `--exclude-extension` 인자를 검증하고 루트 교차 여부와 저장소 잠금을 확인합니다. source root FD를 열고 `COPYING` 상태를 짧은 SQLite 트랜잭션으로 저장합니다. 이후 엔트리 트랜잭션 안에서 `scan_tree`가 항목을 순회합니다. 디렉터리는 `directory_entries`에 경로를 기록하고 빈 디렉터리도 manifest에 남깁니다. symlink, 특수 파일, 다른 device는 내용을 열지 않고 `excluded_entries`에 경로·유형·사유만 기록합니다. extension filter와 일치하는 정규 파일도 blob을 읽기 전에 제외 목록에 추가됩니다. 나머지 파일은 `open_beneath`로 열고 `save_blob`가 읽기와 해싱을 수행합니다. 파일의 `dev`, `ino`, `size`, `mtime`이 복사 전후 달라지면 snapshot은 실패하고, 안정성 확인 시점의 wall-clock nanoseconds가 `observed_at_ns`로 저장됩니다.
+`cmd_snapshot`은 먼저 반복형 `--exclude-extension` 인자를 검증하고 루트 교차 여부와 저장소 잠금을 확인합니다. 저장소 설정에서 blob quota를 읽고 설정된 경우 blob namespace를 FD/no-follow 방식으로 열거해 사용 byte를 계산합니다. source root FD를 열고 `COPYING` 상태를 짧은 SQLite 트랜잭션으로 저장합니다. 이후 엔트리 트랜잭션 안에서 `scan_tree`가 항목을 순회합니다. 디렉터리는 `directory_entries`에 경로를 기록하고 빈 디렉터리도 manifest에 남깁니다. symlink, 특수 파일, 다른 device는 내용을 열지 않고 `excluded_entries`에 경로·유형·사유만 기록합니다. extension filter와 일치하는 정규 파일도 blob을 읽기 전에 제외 목록에 추가됩니다. 나머지 파일은 `open_beneath`로 열고 `save_blob`가 읽기와 해싱을 수행합니다. 파일의 `dev`, `ino`, `size`, `mtime`이 복사 전후 달라지면 snapshot은 실패하고, 안정성 확인 시점의 wall-clock nanoseconds가 `observed_at_ns`로 저장됩니다. 새 고유 blob이 남은 byte quota보다 크면 `SRE_STORE_QUOTA_EXCEEDED`를 반환하고 snapshot 상태를 실패로 기록합니다. 이미 존재하는 같은 hash는 검증 후 추가 quota 없이 참조합니다.
 
 `cmd_init`은 저장소 경로의 부모를 먼저 canonicalize하고 prospective store와 source의 포함 관계를 검사합니다. 새 저장소가 source 아래라면 디렉터리를 만들기 전에 거부해 source 안에 초기화 부산물이 남지 않게 합니다. mkdir 이후 실제 경로도 다시 확인합니다. `safe_relative_path`는 별도 header의 bounded lexical check이고, 실제 파일 접근의 dirfd/openat2 제약을 대체하지 않습니다.
 
@@ -30,13 +30,13 @@
 
 ## restore 흐름
 
-`cmd_restore`는 sidecar가 DB와 맞는지 우선 검사합니다. dry-run은 dirfd 기준으로 부모 경로를 symlink-follow 없이 살피고 파일과 디렉터리 계획을 JSONL로 출력합니다. 없는 파일/디렉터리는 create, 기존 파일은 기본 preserve, `--overwrite` 파일은 replace, symlink/non-directory 부모와 overwrite 대상 directory는 blocked로 분류합니다. 요약은 삭제 0건과 target write 미실행을 기록하며 계획 레코드는 별도 Draft 2020-12 schema로 검증됩니다. 이 관찰은 시점이 고정된 예약이 아닙니다. 실제 복원은 `--confirm`을 요구하고, no-overwrite 설치는 `RENAME_NOREPLACE`로 충돌을 다시 확인하지만, overwrite 시점의 대상은 계획 후 달라질 수 있습니다.
+`cmd_restore`는 sidecar가 DB와 맞는지 우선 검사합니다. dry-run은 dirfd 기준으로 부모 경로를 symlink-follow 없이 살피고 파일과 디렉터리 계획을 JSONL로 출력합니다. 없는 파일/디렉터리는 create, 기존 파일은 기본 preserve, `--overwrite` 파일은 replace, symlink/non-directory 부모와 overwrite 대상 directory는 blocked로 분류합니다. 요약은 삭제 0건과 target write 미실행을 기록하며 계획 레코드는 별도 Draft 2020-12 schema로 검증됩니다. 이 관찰은 시점이 고정된 예약이 아닙니다. 실제 복원은 `--confirm`을 요구합니다. 설치 직전 다시 관찰한 대상 `(device,inode,type)`이 처음 값과 다르면 `ESTALE`/충돌로 임시 파일을 버립니다. no-overwrite 설치는 추가로 `RENAME_NOREPLACE`를 사용합니다. 마지막 비교와 `renameat2` 사이에 lock을 무시하는 외부 writer가 만드는 경합은 남습니다.
 
 `ensure_parent`는 root FD를 복제해 `mkdirat`와 `openat(O_DIRECTORY|O_NOFOLLOW)`로 대상 부모를 단계별로 엽니다. `restore_directory`는 빈 디렉터리를 포함한 디렉터리를 경로 순서로 만들며, 기존 directory는 유지하고 파일·symlink가 같은 이름을 차지하면 실패합니다. 디렉터리 권한·소유권·시간은 manifest에 포함하지 않습니다. `restore_one`은 blob을 열고 대상 디렉터리에 고유 임시 파일을 만듭니다. 내용을 복사하고 파일을 `fsync`, 다시 열어 크기와 SHA-256을 확인한 다음 mode·uid/gid·mtime 적용을 시도합니다. metadata 적용 실패는 복원 파일 자체를 실패로 취급하지 않고 `metadata_partial` 결과로 나타납니다. `renameat2`로 파일 하나를 설치하고 설치 이름을 `O_NOFOLLOW`로 다시 열어 inode·크기·hash를 확인한 뒤 부모 디렉터리를 `fsync`합니다. post-install 확인 실패는 이미 이름이 교체된 뒤 발생할 수 있어 오류 반환이 자동 rollback을 뜻하지 않습니다. 트리 전체가 all-or-nothing이라고 보장하지 않습니다.
 
 ## prune, doctor, audit
 
-`cmd_prune`은 최신 `keep`개 committed snapshot을 남기고, 삭제 대상의 크기를 계산한 뒤 SQLite 트랜잭션으로 참조 행을 제거합니다. DB commit 이후 sidecar를 지우고 manifest 디렉터리를 `fsync`합니다. 남은 **committed** DB 행에서 참조 해시 집합을 만든 다음 참조가 없는 정규 파일 blob을 정리합니다. 실패 snapshot의 행은 live blob reference로 취급하지 않습니다. DB commit 후 파일 정리가 실패하면 일부 sidecar/고아 blob이 남을 수 있으며 `doctor`의 고아 manifest 정리와 후속 prune이 복구 경로입니다.
+`cmd_prune`은 최신 `keep`개 committed snapshot을 남기고, 삭제 대상의 크기를 계산한 뒤 SQLite 트랜잭션으로 참조 행을 제거합니다. DB commit 이후 sidecar를 지우고 manifest 디렉터리를 `fsync`합니다. 남은 **committed** DB 행에서 참조 해시 집합을 만든 다음 참조가 없는 정규 파일 blob을 정리합니다. 실패 snapshot의 행은 live blob reference로 취급하지 않습니다. DB commit 후 파일 정리가 실패하면 일부 sidecar/고아 blob이 남을 수 있으며 `doctor`의 고아 manifest 정리와 후속 prune이 복구 경로입니다. `init --max-store-bytes N`은 final blob namespace의 content byte quota를 `store_settings`에 저장하며 `0`은 무제한입니다.
 
 `cmd_doctor`는 stale `COPYING`/`VERIFIED` 상태를 `FAILED`로 전환합니다. SQLite의 `COMMITTED` ID 목록을 기준으로 manifest 디렉터리를 훑어 고아 `.json` 파일을 제거하고 디렉터리를 동기화합니다. 이어 `temp/`에서 `.part` 파일 또는 심볼릭 링크를 제거합니다. 테스트의 상태 삽입은 합성된 DB 상태이며 프로세스 강제 종료 증거가 아닙니다.
 
