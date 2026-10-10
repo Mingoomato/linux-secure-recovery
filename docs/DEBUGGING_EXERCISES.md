@@ -1,43 +1,37 @@
-# Debugging and Independent Reproduction Exercises
+# 디버깅 및 독립 구현 과제
 
-These exercises contain no solutions. Use throwaway source/store/target directories. Never test destructive recovery against valuable data.
+아래 과제는 완성 풀이를 제공하지 않습니다. 하나를 선택해 임시 브랜치와 `/tmp` 기반 테스트 저장소에서 직접 구현하세요. 실제 사용자 데이터로 복원 시험을 하지 마세요.
 
-## Exercise 1 — Corrupt blob and prove restore fails closed
+## 과제 1 — 대상 경로 symlink 경계 회귀 테스트
 
-**Goal:** Verify that a corrupted content object cannot be installed at the restore target.
+**목표:** 복원 대상 안의 symlink 부모 디렉터리가 대상 루트 밖 쓰기로 이어지지 않음을 증명합니다.
 
-**Starting points:** `cmd_verify`, `blob_path`, `restore_one`, staged-file SHA-256 check, and `tests/smoke.sh`.
+**읽을 위치:** `ensure_parent`, `restore_one`, `safe_relative_path`, `tests/smoke.sh`.
 
-Create a snapshot, alter one blob byte in a temporary store, then run verify and confirmed restore into an empty temporary target. Capture exit status, JSON/diagnostic output, and target contents. Add an automated regression test for both verification and restore.
+중첩된 target 경로 구성요소를 외부 임시 디렉터리를 가리키는 symlink로 만들고 confirmed restore를 수행합니다. 반환값, 진단, 외부 디렉터리와 target 파일을 검사하고 통합 회귀 테스트를 추가합니다.
 
-**Constraints:** Use only temporary local files. Do not overwrite an existing destination. Preserve the original blob bytes for post-test cleanup.
+**완료 기준:** target root 바깥에 파일이 생성/교체되지 않고 실패가 관측됩니다. 기존 정상 중첩 경로 복원은 계속 통과합니다.
 
-**Acceptance:** Neither the bad bytes nor an incomplete file become a successful restore, and the failure is attributable to the selected snapshot entry.
+## 과제 2 — audit 경로의 symlink 공격 시험
 
-## Exercise 2 — Restore path and symlink safety
+**목표:** `audit/events.ndjson`이 심볼릭 링크 또는 외부 파일과 hard link를 공유할 때 외부 파일을 변경하지 않음을 증명합니다.
 
-**Goal:** Reproduce path-traversal and target-symlink boundary behavior.
+**읽을 위치:** `audit`, `UniqueFd`, `cmd_snapshot`, `contracts/operation-v1.schema.json`, `tests/smoke.sh`.
 
-**Starting points:** `safe_relative_path`, `ensure_parent`, `restore_one`, `open_beneath`.
+별도 임시 store에서 audit 경로를 외부 sentinel을 가리키는 symlink 및 hard link로 각각 준비합니다. snapshot 명령 결과, DB 상태, 외부 파일 bytes, 남은 blob/manifest 상태를 기록합니다. 실패가 snapshot commit 뒤에 발생할 수 있는지도 추적합니다.
 
-Test entries with `../`, repeated separators, absolute path, a symlinked parent, a symlink final component, nested directories, a backslash in a filename, and a target path that shares a textual prefix with another directory. Add a controlled manifest test seam if needed.
+**완료 기준:** sentinel은 바뀌지 않습니다. 결과는 committed 데이터와 audit 기록 실패를 구분할 수 있어야 하며, 테스트가 임시 디렉터리 밖을 건드리지 않습니다.
 
-**Constraints:** Keep all paths inside temporary roots. Do not weaken `O_NOFOLLOW` or `openat2` constraints to make a test pass.
+## 과제 3 — SRS의 `show` 조회를 확장
 
-**Acceptance:** No entry escapes the opened target root; safe nested paths still restore correctly; every rejected case is visible.
+**목표:** `sre show --store STORE --snapshot ID`가 committed/failed 상태와 파일 수·총 크기를 안전하게 요약하도록 독립적으로 개선합니다.
 
-## Exercise 3 — Reproduce stale-snapshot recovery independently
+**읽을 위치:** `cmd_show`, SQLite 쿼리 준비/바인딩/정리, `json_quote`, `tests/smoke.sh`.
 
-**Goal:** Build a small independent regression test for interrupted snapshot state and verify recovery is repeatable.
+누락된 ID, 내부 sentinel ID, 빈 snapshot, 오래된 FAILED snapshot을 포함한 테스트를 추가합니다. 출력은 한 줄 JSON으로 유지하고 문자열 값은 JSON 계약에 맞춰 인코딩합니다.
 
-**Starting points:** `snapshots` table, `cmd_doctor`, `.operation.lock`, `tests/smoke.sh`.
+**완료 기준:** 정상 출력은 실제 DB 집계와 일치하고, 잘못된 ID·누락된 snapshot은 성공처럼 보이지 않습니다. SQLite statement와 연결은 모든 경로에서 정리됩니다.
 
-In a disposable store, create a committed snapshot, add a second synthetic row left in `COPYING`, and place an abandoned temp artifact in the store temp directory. Run doctor and inspect both database and filesystem state. Run it again and check whether the recovery operation is idempotent. Add the test to the project smoke suite.
+## 시도 기록
 
-**Constraints:** Use disposable storage. Do not manually delete the SQLite database or change a committed snapshot's state. Treat the fixture as a simulated state, not proof of power-loss behavior.
-
-**Acceptance:** The committed snapshot remains verifiable, the incomplete row is not exposed as a committed snapshot, temp cleanup can be repeated safely, and the test clearly distinguishes synthetic state from a real crash.
-
-## Owner attempt record
-
-Record the selected exercise, state transitions, test evidence, and unresolved risk. The repository does not infer owner mastery; personal reproduction status is **not yet evidenced**.
+선택한 과제, 구현한 코드 경로, 실행한 테스트, 실패 로그와 해결 이유를 기록하세요. automated build 통과는 개인 숙련도를 뜻하지 않습니다. 소유자 재현 상태는 직접 제출한 코드와 설명을 확인하기 전까지 **미평가**입니다.

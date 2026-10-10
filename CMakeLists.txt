@@ -15,4 +15,6 @@ target_link_libraries(sre PRIVATE OpenSSL::Crypto SQLite3::SQLite3)
 include(CTest)
 if(BUILD_TESTING)
     add_test(NAME recovery-smoke COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke.sh)
+    set_tests_properties(recovery-smoke PROPERTIES
+        ENVIRONMENT "BIN_DIR=${CMAKE_CURRENT_BINARY_DIR}")
 endif()

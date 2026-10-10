@@ -1,18 +1,22 @@
-# Threat model
+# SRE 위협 모델
 
-## Protected assets
+## 보호 대상과 의도
 
-Committed snapshots and their regular-file content blobs are protected against accidental partial writes and detectable corruption.
+SRE는 명시적으로 만든 사전 snapshot을 우발적인 파일 손상/삭제 뒤에 확인하고 복원하는 교육용 로컬 엔진입니다. 자동 pre-write 백업, 악성코드 격리, 실전 침해 방어를 제공하지 않습니다.
 
-## Controls
+## 구현된 통제
 
-- Source/store overlap is rejected.
-- Source traversal rejects symlinks, mount crossings, special files, unstable reads, and files larger than 1 GiB.
-- openat2 path resolution fails closed on unsupported kernels.
-- Blob creation uses exclusive temp files, file fsync, atomic rename, and directory fsync.
-- Restore requires --confirm for writes, uses --overwrite to replace, never deletes the tree, and verifies restored hashes.
-- SQLite metadata uses transactions, WAL, and FULL synchronous mode.
+- source와 store의 동일/중첩 경로를 거부합니다.
+- symlink root와 symlink 파일을 따라가지 않으며 `openat2`의 beneath/no-symlink/no-magiclink 제약을 요구합니다.
+- 파일별 전후 stat 상태를 비교하고 content SHA-256을 확인합니다.
+- blob과 manifest를 temp → fsync → rename 순서로 설치합니다.
+- restore 쓰기에 `--confirm`, 기존 파일 교체에 별도 `--overwrite`를 요구합니다.
+- target 아래의 한 파일씩 설치하고 source에 없는 경로를 삭제하지 않습니다.
+- manifest/blob 손상은 verify와 restore에서 거부합니다.
+- SRE 프로세스끼리 `flock`으로 직렬화하고 operation audit log를 owner-only 모드로 씁니다.
 
-## Residual risks
+## 신뢰 가정과 제외 위험
 
-The store is not immutable against root or the same owner, and a common disk failure can destroy source and backup together. The JSON manifest/audit logs are not signed. Existing-file replacement is atomic but does not preserve the replaced version unless it was previously snapshotted. Directories, ACLs, xattrs, hardlink identity, ownership, and global filesystem snapshot consistency are not preserved. Crash recovery and durability assumptions require VM fault testing.
+Store와 상위 디렉터리는 현재 사용자 소유의 신뢰 경로라고 가정합니다. root나 같은 사용자 권한의 공격자는 blob/DB/log를 바꿀 수 있습니다. 잠금을 무시하는 외부 프로그램은 경합을 만들 수 있습니다. 원본과 백업이 같은 디스크면 해당 디스크 고장에 취약합니다. 감사 로그와 manifest는 서명되지 않습니다.
+
+SRE는 ACL/xattr/hardlink identity, 트리 전체 시점 일관성, quota, 원격 저장, 암호화, root 공격자 방어를 제공하지 않습니다. UID/GID 복원은 권한에 따라 실패할 수 있습니다. Crash durability와 storage fault 처리 주장은 현재 시험하지 않은 범위입니다.

@@ -1,11 +1,12 @@
-# Architecture
+# SRE 아키텍처
 
-1. The source and store roots are canonicalized and must not overlap.
-2. Each CLI operation takes an exclusive advisory flock on the owner-private `.operation.lock`; this prevents SRE commands such as verify and prune from racing each other.
-3. Source traversal starts at a directory descriptor and enumerates without following symlinks or crossing the root device. Regular files are opened with openat2 and RESOLVE_BENEATH, RESOLVE_NO_SYMLINKS, and RESOLVE_NO_MAGICLINKS.
-4. Each file is copied while hashing into an exclusive temporary blob. A before/after fstat stability check, blob fsync, same-filesystem rename, and shard-directory fsync precede manifest references.
-5. SQLite uses WAL and full synchronous mode with foreign-key enforcement. Snapshot rows move from COPYING to COMMITTED only after file entries are complete.
-6. Restore plans are read-only in dry-run mode. Confirmed restore verifies the blob, writes a temp file beside the destination, fsyncs, atomically renames, re-hashes, and fsyncs the parent directory.
-7. `doctor` marks a leftover COPYING row as FAILED and removes abandoned `.part` files while holding the same store lock.
+1. CLI는 source/store/target root를 검증하고 각 저장소 작업에서 owner-private `.operation.lock`에 배타 `flock`을 얻습니다.
+2. Snapshot traversal은 source directory FD를 기준으로 `readdir`, `fstatat(AT_SYMLINK_NOFOLLOW)`, `openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS)`를 사용합니다.
+3. 정규 파일은 크기 상한을 확인하고 고정 크기 버퍼로 읽습니다. 전후 `fstat`가 다르면 해당 snapshot은 실패합니다. 같은 bytes의 SHA-256은 content-addressed blob 이름입니다.
+4. Blob은 temp 파일에 기록하고 file `fsync`, 같은 store filesystem 안에서 rename, shard directory `fsync` 후 DB entry가 참조합니다.
+5. SQLite는 WAL, `synchronous=FULL`, foreign key를 설정합니다. snapshot row는 `COPYING`, `VERIFIED`, `COMMITTED` 상태를 거칩니다. DB와 파일시스템은 별도 commit domain입니다.
+6. `manifest.v1` sidecar는 DB 엔트리에서 canonical JSON으로 생성되고 SHA-256 integrity field를 포함합니다. signature/authentication을 제공하지 않습니다.
+7. Restore는 dry-run 또는 승인 후 파일별 temp write/hash check/metadata attempt/`renameat2`/parent directory `fsync`로 처리합니다. 트리 전체 atomicity는 주장하지 않습니다.
+8. Prune은 보존 밖 DB 참조를 삭제한 뒤 sidecar 및 committed snapshot이 참조하지 않는 blob을 정리합니다. Doctor는 stale state, orphan sidecar, `.part` 항목을 보수적으로 회수합니다.
 
-The manifest stores per-file consistency, not a globally consistent tree snapshot. Content-addressed dedup is used; pruning removes database references first and only deletes blobs with no remaining references. The advisory lock coordinates SRE CLI processes only; external writers may ignore it.
+기술 검증은 로컬 CTest와 sanitizer/analyzer에 한정됩니다. crash durability와 quota/benchmark 요구사항은 아직 충족되지 않았습니다. [`CONSISTENCY_MODEL.md`](CONSISTENCY_MODEL.md), [`THREAT_MODEL.md`](THREAT_MODEL.md), [`TEST_RESULTS.md`](TEST_RESULTS.md)를 참조하세요.

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://linuxsecurity.local/sre/operation-v1.schema.json",
+  "title": "SRE operation audit event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "operation",
+    "snapshot_id",
+    "affected_count",
+    "byte_count",
+    "confirmed",
+    "observed_at"
+  ],
+  "properties": {
+    "schema_version": { "const": "operation.v1" },
+    "operation": {
+      "enum": ["snapshot", "verify", "restore_dry_run", "restore", "prune"]
+    },
+    "snapshot_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "affected_count": { "type": "integer", "minimum": 0 },
+    "byte_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Logical bytes represented or affected; prune does not report physical bytes reclaimed."
+    },
+    "confirmed": { "type": "boolean" },
+    "observed_at": { "type": "integer", "minimum": 0 }
+  }
+}

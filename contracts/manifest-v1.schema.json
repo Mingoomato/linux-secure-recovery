@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SRE snapshot manifest v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "snapshot_id",
+    "source_root_identity",
+    "created_at",
+    "consistency",
+    "entry_count",
+    "incomplete_count",
+    "entries",
+    "manifest_integrity_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "manifest.v1"},
+    "snapshot_id": {"type": "string", "pattern": "^snap-[0-9]+-[0-9a-f]{32}$"},
+    "source_root_identity": {
+      "type": "object",
+      "required": ["path"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "device": {"type": "integer", "minimum": 0},
+        "inode": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "created_at": {"type": "integer", "minimum": 0},
+    "consistency": {"const": "per_file_verified"},
+    "entry_count": {"type": "integer", "minimum": 0},
+    "incomplete_count": {"type": "integer", "minimum": 0},
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["relative_path", "type", "size", "sha256", "mode", "uid", "gid", "mtime_ns", "stable"],
+        "properties": {
+          "relative_path": {"type": "string", "minLength": 1},
+          "type": {"const": "file"},
+          "size": {"type": "integer", "minimum": 0},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "mode": {"type": "integer", "minimum": 0, "maximum": 511},
+          "uid": {"type": "integer", "minimum": 0},
+          "gid": {"type": "integer", "minimum": 0},
+          "mtime_ns": {"type": "integer"},
+          "stable": {"const": true}
+        },
+        "additionalProperties": false
+      }
+    },
+    "manifest_integrity_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

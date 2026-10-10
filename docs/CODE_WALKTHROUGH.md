@@ -1,29 +1,47 @@
-# Code Walkthrough — Linux Secure Recovery Engine
+# SRE 코드 워크스루
 
-## 1. CLI, operation lock, and roots
+## 코드 읽기 순서
 
-`main` dispatches the SRE commands. Every command that uses a store obtains `StoreLock`, which opens `.operation.lock` with `O_NOFOLLOW`, checks that it is a private owner-owned regular file, and waits for `flock(LOCK_EX)`. RAII releases and closes the lock FD when the command returns. This serializes SRE's own operations; advisory locks do not stop unrelated tools that ignore them. `canonical_dir` rejects a symlink or non-directory input and resolves an existing directory. `cmd_init` and `cmd_snapshot` reject source/store overlap. The source root is opened as a directory FD; later traversal is rooted there rather than using the process working directory.
+현재 구현은 작은 포트폴리오 범위에 맞춰 대부분의 동작을 [`src/sre.cpp`](../src/sre.cpp)에 둡니다. 다음 순서로 읽으면 저장소 경계에서 파일 복원까지의 흐름이 보입니다.
 
-## 2. Opening source paths
+1. `main` — 인자와 명령 디스패치: `init`, `snapshot`, `list`, `show`, `verify`, `restore`, `prune`, `doctor`.
+2. `canonical_dir`, `StoreLock`, `ensure_store_dirs` — 입력 루트와 저장소 구성, 명령 직렬화.
+3. `open_beneath`, `scan_tree`, `save_blob`, `sha256_fd`, `same_state` — 안전한 열기, 재귀 순회, 콘텐츠 저장과 안정성 확인.
+4. `open_db`, `manifest_document`, `write_manifest_atomic`, `manifest_matches_db` — DB 스키마와 매니페스트 계약.
+5. `cmd_snapshot`, `cmd_show`, `cmd_verify` — 생성, 조회, 검증.
+6. `ensure_parent`, `restore_one`, `cmd_restore` — 대상 디렉터리 FD 처리와 원자적인 파일 단위 복원.
+7. `cmd_prune`, `cmd_doctor`, `audit` — 참조 보존, 잔여 상태 복구, 작업 로그.
 
-`open_beneath` builds a zero-initialized `open_how`, sets `O_CLOEXEC`, and asks `SYS_openat2` to resolve beneath a root FD without symlinks or magic links. If the syscall is not available, it fails closed. `scan_tree` recursively enumerates a duplicated directory FD, uses `fstatat(..., AT_SYMLINK_NOFOLLOW)`, skips cross-device/symlink entries, opens child directories under the same root, and processes only regular files.
+## snapshot 제어 흐름
 
-## 3. Blob creation and manifest rows
+`cmd_snapshot`은 먼저 루트 교차 여부와 저장소 잠금을 확인합니다. source root FD를 열고 `COPYING` 상태를 짧은 SQLite 트랜잭션으로 저장합니다. 이후 엔트리 트랜잭션 안에서 `scan_tree`가 항목을 순회합니다. 일반 파일은 `open_beneath`로 열고 `save_blob`가 읽기와 해싱을 수행합니다. 파일의 `dev`, `ino`, `size`, `mtime`이 복사 전후 달라지면 snapshot은 실패합니다.
 
-`save_blob` opens one regular file, records `fstat` state, creates an exclusive temp blob, and streams each read chunk through EVP SHA-256 and `write_all`. It compares post-copy `fstat`; unstable input is rejected. After `fsync`, it derives a SHA-256 path, ensures the shard is a real directory, reuses an existing digest blob or renames the temp blob into place, then fsyncs the shard directory.
+새 blob은 `temp/<snapshot>-<index>.part`에 `O_EXCL`로 작성됩니다. 파일 `fsync`와 최종 콘텐츠 주소 경로로의 `renameat2(RENAME_NOREPLACE)`, shard 디렉터리 `fsync`가 성공해야 DB 엔트리가 해당 해시를 참조합니다. 이미 존재하는 blob은 symlink를 따르지 않고 일반 파일, 크기, 해시, 안정 상태를 다시 확인합니다.
 
-`cmd_snapshot` creates a `COPYING` SQLite row in a short transaction, then starts the transaction that contains file entries. `scan_tree` inserts each row only after its blob is finalized. At the end the snapshot state changes to `COMMITTED`, and a JSON manifest and audit line are written. The intended invariant is “durable blob before manifest reference.” The code does not yet provide full crash-recovery tooling for all intermediate states.
+엔트리 트랜잭션이 완료되면 상태는 `VERIFIED`가 됩니다. `manifest_document`가 DB 엔트리로부터 canonical JSON을 만들고, 무결성 해시는 해시 필드가 빠진 JSON payload의 SHA-256입니다. sidecar 파일을 임시 경로에 쓴 뒤 파일을 `fsync`, manifest 디렉터리 안에서 원자적으로 설치하고 디렉터리를 `fsync`합니다. 마지막 DB 트랜잭션이 상태를 `COMMITTED`로 바꿉니다. SQLite와 일반 파일시스템은 하나의 원자 트랜잭션이 아니므로 모든 crash interleaving은 아직 fault injection으로 입증되지 않았습니다.
 
-## 4. Verification and restore
+## show와 verify
 
-`load_entries` reads entries and checks each relative path with `safe_relative_path`. `cmd_verify` opens each content-addressed blob without following a final symlink and recalculates its digest.
+`cmd_show`는 snapshot ID를 제한된 문자 집합으로 확인하고, DB에서 `source_root`, `created_at`, `state`, `incomplete_count`, 엔트리 수, byte 합계를 읽어 JSON으로 출력합니다. 존재하지 않는 ID와 `__store__`는 상세 조회 대상이 아닙니다.
 
-`cmd_restore` validates the target root and snapshot, then either prints a dry-run plan or requires `--confirm`. `ensure_parent` walks/creates destination directories with `mkdirat` and `openat(O_DIRECTORY|O_NOFOLLOW)`. `restore_one` checks conflict policy, opens the blob, creates a same-directory temp file, copies and fsyncs bytes, reopens and hashes the staged file, applies mode, then uses `renameat2`. It confirms that the installed entry is the staged inode and fsyncs the destination directory. The code restores mode but does not restore ownership or mtime.
+`cmd_verify`는 커밋된 snapshot의 DB 엔트리를 읽고 sidecar의 bytes가 DB에서 다시 생성한 canonical JSON과 같은지 확인합니다. 이어 각 content-addressed blob을 `O_NOFOLLOW`로 열어 일반 파일 여부, 크기, 읽기 전후 stat 상태, SHA-256을 확인합니다. 불량 항목은 `bad`를 늘리고 exit 2를 반환합니다. 감사 이벤트 기록 자체가 실패하면 명령 결과도 실패할 수 있습니다.
 
-## 5. Doctor, pruning, and audit
+## restore 흐름
 
-`cmd_doctor` runs under the same store lock, changes leftover `COPYING` rows to `FAILED` with one incomplete item, and removes regular files or symlinks ending in `.part` from `temp/`. The test seeds this state directly in SQLite; it is not a true process-crash simulation. `cmd_prune` orders committed snapshots by creation time, deletes database rows beyond the retention count, removes JSON manifests, computes the set of still-referenced hashes, and recursively removes unreferenced regular files. Review transaction boundaries and crash behavior: manifest unlink happens before the SQLite transaction commits, and GC is not fault-injection tested. `audit` appends operation ID/count/confirmation metadata to a local NDJSON file.
+`cmd_restore`는 sidecar가 DB와 맞는지 우선 검사합니다. dry-run은 각 상대 경로와 digest를 출력하지만 전체 target 충돌 계획을 계산하지 않습니다. 실제 복원은 `--confirm`을 요구합니다. 기존 파일이 있으면 기본 동작은 건너뛰며 `--overwrite`일 때만 교체합니다.
 
-## 6. Ownership and failure review
+`ensure_parent`는 root FD를 복제해 `mkdirat`와 `openat(O_DIRECTORY|O_NOFOLLOW)`로 대상 부모를 단계별로 엽니다. `restore_one`은 blob을 열고 대상 디렉터리에 고유 임시 파일을 만듭니다. 내용을 복사하고 파일을 `fsync`, 다시 열어 크기와 SHA-256을 확인한 다음 mode·uid/gid·mtime 적용을 시도합니다. metadata 적용 실패는 복원 파일 자체를 실패로 취급하지 않고 `metadata_partial` 결과로 나타납니다. `renameat2`로 하나의 파일을 설치하고 inode 확인 및 부모 디렉터리 `fsync`를 수행합니다. 트리 전체가 all-or-nothing이라고 보장하지 않습니다.
 
-The code uses raw file descriptors and explicit cleanup. For each error branch, track `rootfd`, source `src`, temp `dst`, reopened `staged_fd`, `dirfd`, `sqlite3*`, `sqlite3_stmt*`, and `EVP_MD_CTX*`. C++ RAII protects strings, vectors, streams, and filesystem paths, but it does not automatically close these C resources. Current manual cleanup is extensive but lacks a uniform scope guard; injected failures are needed to verify every path.
+## prune, doctor, audit
+
+`cmd_prune`은 최신 `keep`개 committed snapshot을 남기고, 삭제 대상의 크기를 계산한 뒤 SQLite 트랜잭션으로 참조 행을 제거합니다. DB commit 이후 sidecar를 지우고 manifest 디렉터리를 `fsync`합니다. 남은 **committed** DB 행에서 참조 해시 집합을 만든 다음 참조가 없는 정규 파일 blob을 정리합니다. 실패 snapshot의 행은 live blob reference로 취급하지 않습니다. DB commit 후 파일 정리가 실패하면 일부 sidecar/고아 blob이 남을 수 있으며 `doctor`의 고아 manifest 정리와 후속 prune이 복구 경로입니다.
+
+`cmd_doctor`는 stale `COPYING`/`VERIFIED` 상태를 `FAILED`로 전환합니다. SQLite의 `COMMITTED` ID 목록을 기준으로 manifest 디렉터리를 훑어 고아 `.json` 파일을 제거하고 디렉터리를 동기화합니다. 이어 `temp/`에서 `.part` 파일 또는 심볼릭 링크를 제거합니다. 테스트의 상태 삽입은 합성된 DB 상태이며 프로세스 강제 종료 증거가 아닙니다.
+
+`audit`는 `O_APPEND|O_CREAT|O_NOFOLLOW`로 `audit/events.ndjson`을 열고 owner-owned regular file이며 hard link가 하나인지 확인한 뒤 0600 모드로 맞춥니다. 레코드에는 operation, snapshot ID, affected count, byte count, confirmed, observed time이 들어가며 append 후 `fsync`합니다. `byte_count`는 논리 바이트 합이며 prune에서 실제 디스크 reclaim 크기를 뜻하지 않습니다. 로컬 로그는 서명되지 않았고 같은 사용자는 수정할 수 있습니다. Audit 기록이 snapshot commit 이후 실패할 수 있으므로 명령 비정상 종료가 데이터 rollback을 뜻하지는 않습니다.
+
+## 자원 수명과 디버깅 지점
+
+`UniqueFd`는 FD를 소유하고 복사가 금지됩니다. `StoreLock`도 내부 FD를 소유해 RAII로 잠금을 풀고 닫습니다. 그 외 `rootfd`, `src`, `dst`, SQLite statement/connection은 함수 안에서 명시적으로 정리하므로 예외가 발생하는 모든 분기에서 소유권을 따라가야 합니다. OpenSSL EVP context 역시 오류 처리와 finalization을 확인합니다.
+
+에러 분석 시 `errno`를 덮어쓰기 전에 저장하고, SQLite 오류는 해당 연결을 닫기 전에 복사하며, `close`, `fsync`, `renameat2` 결과를 구분해 기록하세요. 회귀 검증은 [`tests/smoke.sh`](../tests/smoke.sh)에서 수행합니다. 여기에는 sidecar/blob tamper, metadata, `show`, audit schema, prune 공유 blob, doctor 및 lock wait가 있습니다.

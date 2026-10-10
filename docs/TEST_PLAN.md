@@ -1,10 +1,23 @@
-# Test plan
+# SRE 검증 계획
 
-- Verify init overlap rejection, openat2 availability, empty/Unicode/binary/zero-byte/large files, symlinks, and special-file exclusion.
-- Snapshot a tree, compare blob hashes, mutate source files, then restore into a separate target and compare bytes.
-- Confirm dry-run changes no target file; confirm existing files are skipped unless overwrite is explicit.
-- Corrupt a blob and manifest; verify reports corruption and refuses unsafe restore.
-- Exercise concurrent source mutation, no-space/I/O failure, abrupt crash between blob and manifest commit, unsupported openat2, quota pruning, and referenced-blob retention.
-- Run 1 GiB/1k benchmark and report hardware/filesystem details only after measurement.
+## 완료된 로컬 게이트
 
-The local recovery smoke and separate ASan/UBSan smoke have been run, including a synthetic stale-row recovery and process-level store-lock check. Corruption, abrupt crash/fault injection, static analysis, and performance scenarios remain pending.
+- GCC Release, Clang Release, ASan/UBSan Debug 빌드와 CTest.
+- snapshot/show/verify, dry-run, 기존 대상 충돌, 파일 복원 및 mode/mtime 확인.
+- blob 및 sidecar 변조, 확인된 복원 거부와 기존 대상 보존.
+- audit NDJSON schema, 파일 mode, affected/byte count, prune의 공유 blob 보존.
+- 합성 중단 상태 및 고아 파일에 대한 `doctor`, 두 프로세스의 advisory lock 동작.
+- Clang static analyzer, JSON Schema validation, `git diff --check`.
+
+## 후속 승격 게이트
+
+1. 루트 중첩, traversal, symlink parent, zero-byte/Unicode/binary/1 GiB 경계 테스트.
+2. snapshot 도중 source mutation, ENOSPC/EIO/EACCES와 fsync/rename fault injection.
+3. 실제 강제 종료 지점을 단계별로 주입하고 이전 committed snapshot의 유지 여부를 확인.
+4. dry-run의 전체 conflict plan, confirm 누락, overwrite race, restore 후 target hash를 검증.
+5. quota/retention 경쟁과 여러 참조 snapshot에서의 GC 불변성 검사.
+6. 1,000개/1 GiB benchmark와 CPU/RSS/I/O/처리량 기록.
+7. 두 배포판, 여러 파일시스템과 마운트 옵션에서 crash/durability 가정을 검증.
+8. fault matrix 결과와 각 SRS MUST의 pass/fail 증거를 문서화.
+
+현재 계획의 미실행 항목은 완료된 것으로 보고하지 않습니다. 상세 결과는 [`TEST_RESULTS.md`](TEST_RESULTS.md)에 있습니다.

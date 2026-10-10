@@ -1,73 +1,77 @@
-# Engineering Study Guide — Linux Secure Recovery Engine
+# SRE 엔지니어링 학습 가이드
 
-## Learning objective and implementation status
+## 프로젝트 의도와 현재 상태
 
-This project teaches local snapshot construction, per-file content integrity, manifest consistency, and safe file-level recovery. It is intended for pre-change snapshots in an isolated lab. A snapshot created after damage cannot recover earlier data; a local store does not protect against root compromise or a shared-disk failure.
+Secure Recovery Engine(SRE)은 변경 전에 사용자가 명시적으로 만든 로컬 파일 스냅샷을 검증하고 복원하는 C++20 학습 프로젝트입니다. `openat2`, 파일 디스크립터 기반 경로 처리, SHA-256, SQLite 상태 관리, `fsync`와 원자적 파일 교체를 통해 Linux 시스템 프로그래밍의 보안 경계를 공부하도록 설계했습니다. 손상 후 만든 백업은 손상 전 데이터를 복구하지 못하며, 이 프로젝트는 실전 랜섬웨어 방어 제품이나 불변 백업이라고 주장하지 않습니다.
 
-The Release build and local recovery CTest smoke passed on the current host, which supports `openat2`. The separate ASan/UBSan smoke also passed. Tests cover snapshot, verification, dry-run, conflict handling, restore, a synthetic stale `COPYING` row, abandoned temp cleanup, and process-level lock waiting. Corrupt-blob injection, abrupt crash/power-loss injection, concurrent source mutation, ENOSPC, overwrite edge cases, performance, and extended static analysis remain unverified. Implementation is partial against SRS-04: restore does not reapply ownership or mtime; quota, complete manifest-sidecar recovery, full dry-run conflict/deletion planning, and crash durability evidence remain incomplete.
+구현에는 `init`, `snapshot`, `list`, `show`, `verify`, `restore`, `prune`, `doctor`가 있습니다. 2026-10-10 기준 GCC Release, Clang Release, ASan/UBSan Debug의 빌드와 CTest가 각각 통과했고 Clang 정적 분석은 진단을 내지 않았습니다. 테스트는 blob 및 manifest 손상, 복원 충돌, mode/mtime, 감사 이벤트 계약, 보존 정리, 합성 중단 상태를 다룹니다. 구현은 SRS-04 전체 완료가 아닙니다. 전원 손실·실제 강제 종료 매트릭스, 자원 고갈 fault injection, 1 GiB 성능 측정, quota, ACL/xattr, 소유권 복원 성공 조건, 트리 전체 일관성은 입증되지 않았습니다. 자동화 검증은 소유자의 개인 숙련도 증거가 아닙니다.
 
-## Why each subsystem exists
+## 하위 시스템이 필요한 이유
 
-| Subsystem | Why it exists | Main implementation |
+| 하위 시스템 | 해결하는 문제 | 핵심 위치 |
 |---|---|---|
-| Root validation | Prevents source and store overlap and anchors traversal in a known directory. | `canonical_dir`, `cmd_init`, `cmd_snapshot` |
-| Store operation lock | Serializes SRE CLI operations so prune cannot remove blobs during verification or restore. | `StoreLock` using `flock(LOCK_EX)` |
-| Constrained path opener | Prevents traversal escape and symlink/magic-link resolution for source entries. | `open_beneath` using `openat2` |
-| Content copier and SHA-256 | Streams bytes into a temporary blob while identifying the content and checking source stability. | `save_blob`, `sha256_fd`, `same_state` |
-| Content-addressed store | Reuses a digest-named blob when identical bytes recur. | `ensure_store_dirs`, `save_blob`, `blob_path` |
-| SQLite manifest | Separates `COPYING` from `COMMITTED` snapshots and links paths/metadata to blob hashes. | `open_db`, `cmd_snapshot`, `load_entries` |
-| Verification | Re-hashes stored blobs before relying on them. | `cmd_verify` |
-| Safe restore | Stages bytes beside the target, checks hash, then atomically renames per file. | `ensure_parent`, `restore_one`, `cmd_restore` |
-| Pruning/audit | Removes old committed snapshot references and collects unreferenced blobs; records operations locally. | `cmd_prune`, `audit` |
-| Restart doctor | Marks snapshots left in `COPYING` as failed and removes abandoned `.part` temp files. | `cmd_doctor` |
+| 루트 검증 | 원본과 저장소의 중첩, symlink 루트를 차단 | `canonical_dir`, `cmd_init`, `cmd_snapshot` |
+| 저장소 잠금 | SRE의 복원·검증과 prune/GC가 서로 간섭하지 않게 직렬화 | `StoreLock`, `flock(LOCK_EX)` |
+| 경로 제한 | 공격자가 바꿀 수 있는 문자열 경로가 루트 밖으로 나가거나 symlink를 따라가지 않게 함 | `open_beneath`, `openat2` |
+| 안정 파일 읽기와 blob 저장 | 복사 중 변한 파일을 정상 스냅샷으로 기록하지 않고 내용으로 중복 제거 | `save_blob`, `sha256_fd`, `same_state` |
+| SQLite 메타데이터 | 경로·해시·파일 메타데이터와 스냅샷 상태를 저장 | `open_db`, `scan_tree`, `cmd_snapshot` |
+| JSON sidecar | DB와 별도로 스냅샷 정보를 내보내고 자체 무결성 해시로 손상 감지 | `manifest_document`, `write_manifest_atomic`, `manifest_matches_db` |
+| 검증과 복원 | 저장 blob을 확인하고 임시 파일을 통해 파일 단위로 교체 | `cmd_verify`, `restore_one`, `cmd_restore` |
+| 보존 정리와 복구 | 오래된 참조와 고아 파일을 정리하고 중단된 상태를 분리 | `cmd_prune`, `cmd_doctor` |
+| 감사 기록 | 실행한 작업, 건수, 바이트 수, 확인 여부를 로컬에 기록 | `audit`, `operation-v1.schema.json` |
 
-## Data and control flow
+## 데이터·제어 흐름
 
-### Snapshot
+### 스냅샷
 
-1. `cmd_snapshot` canonicalizes source and store, rejects overlap, and takes the store's private exclusive advisory lock.
-2. It opens the source directory and captures its device number, creates a random snapshot ID, opens SQLite, commits a `COPYING` row, then starts the transaction for entries.
-3. `scan_tree` enumerates directories relative to directory FDs, rejects symlinks and device changes, and ignores special files.
-4. For each regular file, `save_blob` calls `open_beneath`, samples `fstat`, streams file chunks into a temporary file while hashing, samples `fstat` again, and rejects an unstable source.
-5. The blob is fsynced, closed, renamed to `blobs/sha256/<prefix>/<digest>`, and its shard directory is fsynced before a manifest row can refer to it.
-6. The DB transaction marks the snapshot committed. A JSON manifest and audit row are then written. If a prior process exited while leaving `COPYING`, `doctor` marks that row failed and removes remaining `.part` temp artifacts; it does not reconstruct missing entry rows.
+1. `cmd_snapshot`은 source/store 루트를 검증하고 둘이 겹치지 않는지 확인한 후 전용 `flock`을 얻습니다.
+2. 원본 루트를 디렉터리 FD로 열고, SQLite에 `COPYING` 행을 먼저 커밋합니다.
+3. `scan_tree`는 루트 FD에서 디렉터리를 열거합니다. symlink, 특수 파일, 다른 장치의 항목은 제외합니다.
+4. 일반 파일은 `open_beneath`로 열고, `save_blob`가 복사 전후 `fstat` 상태를 비교하며 읽기와 SHA-256 계산을 동시에 수행합니다.
+5. blob은 저장소 안의 고유 임시 파일에 기록되고 파일 `fsync`, 같은 파일시스템의 rename, shard 디렉터리 `fsync`를 거친 뒤 DB 행이 참조합니다.
+6. DB 엔트리를 기록한 트랜잭션이 끝난 뒤 버전형 JSON sidecar를 원자적으로 설치하고 디렉터리를 동기화합니다. 마지막 DB 트랜잭션이 `VERIFIED`를 `COMMITTED`로 바꿉니다.
+7. `doctor`는 남은 `COPYING`/`VERIFIED`를 `FAILED`로 표시하고, 커밋되지 않은 sidecar와 `.part` 파일을 정리합니다.
 
-### Verify and restore
+### 조회·검증·복원·정리
 
-`cmd_verify` reads committed manifest entries and re-hashes each blob. `cmd_restore` first reads and validates entries; dry-run prints the planned file/hash without writing. Confirmed restore creates needed parent directories beneath an opened target root, opens the blob, writes a same-directory temp file, fsyncs it, reopens and hashes the staged file, applies mode, and uses `renameat2` for per-file replacement/no-replace semantics. It verifies the installed inode and fsyncs the parent directory.
+- `show`는 SQLite 스냅샷 행과 엔트리 집계를 JSON으로 보여 줍니다. `list`는 요약 행을 여러 개 출력합니다.
+- `verify`는 DB 엔트리와 매니페스트 sidecar의 정합성을 비교하고 각 blob이 일반 파일인지, 크기와 SHA-256이 맞는지 확인합니다.
+- `restore --dry-run`은 선택된 경로와 해시를 출력합니다. 현재 전체 충돌 계획을 계산하지는 않습니다. 실제 쓰기는 `--confirm`이 필요하고 덮어쓰기는 `--overwrite`가 추가로 필요합니다.
+- `restore_one`은 대상 디렉터리 FD 아래에 부모를 만들고 같은 디렉터리에 임시 파일을 만듭니다. blob을 복사하고 staged 파일의 크기·해시를 검사한 뒤 mode/소유권/mtime을 가능한 범위에서 적용하고 `renameat2`로 파일 하나를 설치합니다.
+- `prune`은 retention 밖의 DB 행을 트랜잭션으로 삭제하고 sidecar를 제거한 후 여전히 참조되지 않는 blob을 수집합니다. 같은 blob을 다른 스냅샷이 참조하면 남깁니다.
 
-## Ownership, lifetime, and concurrency
+## 소유권, 수명, 동시성
 
-- `Entry` values own their strings and live in vectors for the duration of each operation. SQLite text is copied using `SQLITE_TRANSIENT` during insert; reads are copied before statement finalization.
-- Directory and file FDs are manually managed. `fdopendir` owns a duplicated FD; recursive child FDs are closed after recursion. The OpenSSL `EVP_MD_CTX` is manually freed on success/error paths.
-- Temporary blob names use snapshot ID and entry index with `O_EXCL`; restore temporary names use PID plus a monotonic tick and are created in the destination directory.
-- `StoreLock` owns one lock FD for an entire command. Its destructor unlocks and closes it on normal return or exception. `flock` is advisory; only programs following this lock protocol are serialized.
-- SQLite handles/statements and C++ streams are explicitly closed/finalized; many SQLite return codes in setup/transaction paths are not checked uniformly, so fault-injection review remains important.
-- No worker threads are used. SRE CLI processes serialize through one exclusive store lock, but outside programs can still mutate the source or store. The snapshot sees source files at different times, although each copied file is checked individually, so the tree can reflect mixed times.
+- `Entry`, `std::string`, `std::vector`는 C++ 소유 객체입니다. SQLite 텍스트를 DB에 전달할 때 `SQLITE_TRANSIENT`로 복사하고, 쿼리 결과는 statement가 끝나기 전에 C++ 문자열로 복사해야 합니다.
+- 파일·디렉터리 FD와 SQLite statement/connection은 C API 자원입니다. `UniqueFd`와 `StoreLock`은 RAII로 닫지만, 일부 경로는 여전히 `close`/`sqlite3_finalize`를 명시적으로 관리합니다. OpenSSL `EVP_MD_CTX`는 생성 후 모든 경로에서 해제해야 합니다.
+- `StoreLock`의 FD는 명령 전체 동안 살아 있으며 소멸 시 잠금과 FD를 해제합니다. `flock`은 advisory이므로 잠금을 따르지 않는 프로세스는 저장소를 변경할 수 있습니다.
+- 내부 worker thread는 없습니다. SRE 프로세스는 저장소별 배타 잠금으로 직렬 실행됩니다. 원본을 변경하는 외부 프로그램은 잠금 대상이 아닙니다.
+- `scan_tree`는 파일별 관측 시점을 고정하지 않습니다. 각 파일은 안정 읽기인지 확인하지만 스냅샷 트리 전체가 하나의 시점에서 만들어졌다고 보장하지 않습니다.
 
-## Security assumptions and failure modes
+## 보안 전제와 실패 방식
 
-The store path and its parent directories are trusted and user-private. `openat2` protects source resolution; restore uses an opened target directory and `*at` operations. `safe_relative_path` rejects absolute paths, empty components, `.` and `..` in manifest data. Symlinks, devices, sockets, FIFOs, and files above 1 GiB are excluded.
+저장소와 상위 경로는 신뢰할 수 있고 현재 사용자 소유라는 전제가 있습니다. `openat2`가 지원되지 않으면 경로 제한을 완화하지 않고 실패합니다. JSON 경로 계약 때문에 유효하지 않은 UTF-8 파일 이름은 snapshot 전체를 실패시킵니다. 해시는 우발적 변조를 감지하지만 서명이나 작성자 인증이 아닙니다. root, 동일 사용자, 잠금을 무시하는 프로세스, 원본과 백업을 함께 파괴하는 디스크 고장에 대한 보호는 없습니다.
 
-Expected failures include unsupported `openat2`, unsafe lock files, lock acquisition errors, unstable source files, read/write errors, no space, fsync/rename failure, manifest DB errors, corrupt/missing blobs, target conflicts, insufficient metadata privileges, and process crashes. Blobs may be left unreferenced after a failure; `doctor` recovers stale `COPYING` rows and `.part` files, but it does not reconcile a DB-committed snapshot whose JSON sidecar write failed. The test suite uses a synthetic stale-state fixture; it has not injected real process, kernel, or power failures.
+주요 실패는 `EINTR`, `ENOSPC`, `EIO`, 권한 오류, source 변경, blob/sidecar 손상, fsync/rename 실패, 복원 충돌입니다. 복원은 파일 단위로 진행하므로 일부 파일만 성공할 수 있습니다. mode와 mtime은 smoke fixture에서 확인했습니다. `fchown`은 시도하지만 권한이 부족하면 부분 메타데이터 결과가 됩니다. Audit 기록은 commit 뒤 실패할 수 있어 비정상 종료가 snapshot rollback을 뜻하지 않습니다. 실제 디스크·전원 장애에서 내구성은 검증하지 않았습니다.
 
-## Alternative designs
+## 대안 설계
 
-- **Filesystem snapshots** can provide tree-level point-in-time consistency, but are filesystem-specific and require privileged setup.
-- **Tar/rsync copies** are simpler and broadly available but do not inherently provide a transactional manifest, hash-addressed deduplication, or atomic per-file recovery guarantees.
-- **Remote immutable object storage** protects against local disk/root failure but adds credentials, network retries, retention, and key-management risks.
-- **Write-ahead log/journal** or a manifest-first protocol can improve recovery from crashes, but requires a clear state machine for temp blobs, committed rows, manifests, and garbage collection.
-- **SQLite transaction locking** coordinates database writers but not blob-file reads and deletion; a shared/exclusive lock protocol could allow concurrent readers, while the current single exclusive `flock` keeps the first implementation easier to reason about.
-- **Hard-link deduplication** can reduce space but couples inode metadata and makes immutability assumptions harder to enforce; content-addressed blobs keep data identity separate from destination metadata.
+- Btrfs/ZFS/LVM snapshot은 트리 전체의 일관성을 만들 수 있지만 파일시스템·권한에 묶이고 별도 저장소 보호를 자동으로 주지 않습니다.
+- tar/rsync는 간단하고 익숙하지만 이 프로젝트의 DB 상태, 해시 주소 blob, sidecar 무결성 계약은 별도로 구현해야 합니다.
+- 원격 불변 객체 저장소는 로컬 root/디스크 위험을 줄일 수 있지만 인증, 키 관리, 네트워크 재시도, retention 정책을 더해야 합니다.
+- 전체 트리 임시 생성 후 교체는 더 강한 트리 단위 복원 경계를 만들 수 있지만 공간과 rename 제한이 늘어납니다.
+- 여러 reader와 하나의 writer를 위한 공유 잠금은 병렬 읽기를 허용할 수 있습니다. 현재 배타 잠금은 단순하지만 처리량이 낮습니다.
 
-## Study route
+## 독립 학습 진행
 
-Trace `snapshot` through `scan_tree` → `save_blob` → SQLite entry rows; then trace `restore` through `ensure_parent` and `restore_one`. Draw the point at which blob bytes become durable and the point at which the manifest references them. Use `docs/CODE_WALKTHROUGH.md`, `docs/CONSISTENCY_MODEL.md`, and `docs/LINUX_INTERNALS_EXPLAINED.md` before attempting an exercise.
+1. `docs/CODE_WALKTHROUGH.md`의 함수 순서대로 직접 코드를 따라갑니다.
+2. `docs/LINUX_INTERNALS_EXPLAINED.md`에서 각 시스템 호출이 지키는 경계를 정리합니다.
+3. `docs/DEBUGGING_EXERCISES.md`에서 한 과제를 선택해 별도 브랜치에서 구현하고 테스트 증거를 남깁니다. 과제 풀이 코드는 제공하지 않습니다.
+4. `docs/TECHNICAL_INTERVIEW.md` 질문에 코드 위치와 근거를 들어 답합니다.
 
-## Official references
+## 공식 참고 자료
 
-- [`openat2(2)`](https://man7.org/linux/man-pages/man2/openat2.2.html), [`openat(2)`](https://man7.org/linux/man-pages/man2/openat.2.html)
-- [`flock(2)`](https://man7.org/linux/man-pages/man2/flock.2.html) for process-level advisory locking
-- [`fsync(2)`](https://man7.org/linux/man-pages/man2/fsync.2.html), [`rename(2)` / `renameat2`](https://man7.org/linux/man-pages/man2/rename.2.html), [`stat(2)`](https://man7.org/linux/man-pages/man2/stat.2.html)
-- [SQLite WAL](https://www.sqlite.org/wal.html), [SQLite Atomic Commit](https://www.sqlite.org/atomiccommit.html), [SQLite foreign-key enforcement](https://www.sqlite.org/foreignkeys.html)
+- [`openat2(2)`](https://man7.org/linux/man-pages/man2/openat2.2.html), [`openat(2)`](https://man7.org/linux/man-pages/man2/openat.2.html), [`path_resolution(7)`](https://man7.org/linux/man-pages/man7/path_resolution.7.html)
+- [`fsync(2)`](https://man7.org/linux/man-pages/man2/fsync.2.html), [`rename(2)`](https://man7.org/linux/man-pages/man2/rename.2.html), [`flock(2)`](https://man7.org/linux/man-pages/man2/flock.2.html), [`stat(2)`](https://man7.org/linux/man-pages/man2/stat.2.html)
+- [SQLite WAL](https://www.sqlite.org/wal.html), [SQLite Atomic Commit](https://www.sqlite.org/atomiccommit.html), [SQLite foreign keys](https://www.sqlite.org/foreignkeys.html)
 - [OpenSSL EVP digest API](https://docs.openssl.org/3.0/man3/EVP_DigestInit/)

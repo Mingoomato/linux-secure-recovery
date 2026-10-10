@@ -1,37 +1,48 @@
-# Linux Internals Explained — Linux Secure Recovery Engine
+# SRE에서 사용하는 Linux 내부 인터페이스
 
-## `openat2` path resolution
+## 디렉터리 FD와 `openat2`
 
-`openat2` extends `openat` with a zero-initialized `struct open_how` and `resolve` flags. SRE uses `RESOLVE_BENEATH` to prevent resolution from escaping the directory FD, `RESOLVE_NO_SYMLINKS` to reject symbolic links anywhere in the relative path, and `RESOLVE_NO_MAGICLINKS` explicitly to reject procfs-style magic links. Since libc may not provide a wrapper, the code calls `syscall(SYS_openat2, ...)`. Unsupported kernels fail closed rather than falling back to a weaker path open.
+일반 `open("문자열 경로")`는 현재 경로 구성요소가 바뀌는 경쟁 상황에서 의도하지 않은 위치를 가리킬 수 있습니다. SRE는 source root를 디렉터리 FD로 고정하고 상대 경로를 `openat2(2)`로 엽니다. `RESOLVE_BENEATH`는 루트 아래의 해석을 요구하고, `RESOLVE_NO_SYMLINKS`는 경로 중 symlink를 거부하며, `RESOLVE_NO_MAGICLINKS`는 procfs magic link를 거부합니다. 오래된 커널에서 약한 문자열 경로 호출로 대체하지 않고 실패하는 이유는 요구하는 보안 경계가 유지되지 않기 때문입니다.
 
-The project also checks `st_dev` to skip a mount with a different device. That does not necessarily detect every same-device bind mount; the chosen approach is a simple lab boundary, not a complete mount-namespace policy.
+`readdir`는 이름을 열거할 뿐 해당 파일을 안전하게 열었다는 뜻은 아닙니다. SRE는 `fstatat(..., AT_SYMLINK_NOFOLLOW)`로 종류를 확인한 다음 루트 FD에서 다시 상대 경로를 엽니다. 현재 `st_dev` 비교는 다른 device를 건너뛰는 제한된 정책이며 동일 device bind mount 전체를 식별하는 정책은 아닙니다.
 
-## Stable reads and content identity
+## 파일 안정성, 해시, 메모리
 
-The source FD identifies an opened file object. `fstat` before and after a read compares device, inode, size, and nanosecond mtime. This detects many concurrent modifications but cannot provide a globally consistent tree snapshot. SHA-256 identifies the copied bytes; it does not authenticate who supplied them or make the manifest immutable.
+`open` 이후 FD는 열린 inode를 가리킵니다. `fstat`를 복사 전후 실행해 device, inode, 크기, 나노초 mtime을 비교하면 흔한 동시 변경을 감지합니다. 이는 원본 전체를 잠그지 않으며 모든 파일이 같은 시점에 존재했던 것처럼 보장하지도 않습니다.
 
-## File and directory durability
+파일 내용은 고정 크기 버퍼로 흘려 보내면서 OpenSSL EVP SHA-256 context를 갱신합니다. 메모리 사용량은 파일 전체 크기 대신 버퍼 크기와 일부 메타데이터 목록에 주로 비례합니다. SHA-256은 데이터가 예상 digest와 같은지 확인할 뿐, 생성자 신원·진본성·암호화를 제공하지 않습니다.
 
-The blob is written to a same-store temporary file opened with `O_EXCL`, then `fsync` is called on the file before `rename`. The shard directory is fsynced so the new name is durably recorded. Restore similarly creates a temporary file inside the destination directory, writes and fsyncs it, checks its digest, renames it into place, and fsyncs the parent directory. Rename is atomic for one directory entry on the same filesystem; it does not make a multi-file restore atomic.
+## 임시 파일, `fsync`, rename
 
-When overwrite is disabled, `renameat2(..., RENAME_NOREPLACE)` prevents replacing a target that appears after the earlier conflict check. When overwrite is enabled, flags are zero and rename may atomically replace the final path. Intermediate target directories are opened with `O_NOFOLLOW`, reducing symlink traversal.
+새 blob은 전용 temp 디렉터리에 `O_CREAT|O_EXCL|O_NOFOLLOW`로 만듭니다. `write`는 짧게 쓰거나 `EINTR`로 실패할 수 있으므로 `write_all`이 진행 상태를 추적합니다. 파일에 `fsync`를 수행한 뒤 rename하고 상위 shard 디렉터리도 `fsync`합니다. 파일 `fsync`는 내용과 inode 메타데이터를 저장 장치 계층으로 밀어내고, 디렉터리 `fsync`는 새 이름의 디렉터리 엔트리를 내구성 있게 기록하는 데 필요합니다. 실제 보장은 파일시스템, 마운트 옵션, 장치 캐시와 커널에 따라 달라 실제 전원 장애 검증 없이는 확정할 수 없습니다.
 
-## SQLite and crash ordering
+복원은 대상과 같은 디렉터리에 임시 파일을 만들기 때문에 `renameat2`가 같은 파일시스템 안에서 하나의 이름 변경을 원자적으로 수행할 수 있습니다. `RENAME_NOREPLACE`는 덮어쓰기를 허용하지 않는 모드에서 마지막 경합을 방어합니다. `--overwrite`는 기존 대상 이름을 교체할 수 있습니다. 원자성은 파일 하나에만 해당하고 여러 파일을 하나의 트랜잭션으로 만들지 않습니다.
 
-SQLite WAL and `synchronous=FULL` provide DB transaction behavior; they do not coordinate automatically with blob files or JSON manifest files. SRE deliberately makes blob content durable before inserting references. Crash states can still include an orphan blob, a `COPYING` row, or a DB-committed snapshot whose sidecar manifest was not written. A recovery procedure should inspect state and verify references before garbage collection.
+## SQLite 트랜잭션과 파일시스템
 
-The connection enables `PRAGMA foreign_keys=ON`, so deleting a snapshot can cascade to its entry rows; SQLite does not enable foreign-key enforcement by default on every connection. The code also uses a per-store `flock(LOCK_EX)` file. Linux `flock` is advisory and associated with an open file description: an SRE process waits for other SRE processes using the same lock file, while unrelated code can ignore it. The lock FD's lifetime spans the command and ends when the RAII owner unlocks/closes it.
+연결은 WAL과 `synchronous=FULL`을 설정하고 외래 키를 활성화합니다. Snapshot 상태는 `COPYING → VERIFIED → COMMITTED`로 진행합니다. SQLite transaction은 SQLite DB 안의 행을 원자적으로 다루지만 blob 파일과 JSON sidecar를 함께 묶는 분산 트랜잭션은 아닙니다. 코드의 순서와 `doctor` 복구 규칙은 상태를 해석하기 위한 것이며, crash/power-loss 매트릭스로 검증된 보장은 아닙니다.
 
-`doctor` handles two recognizable leftovers under that lock: database rows still marked `COPYING` become `FAILED` with `incomplete_count=1`, and `.part` artifacts are removed from `temp/`. This is a conservative cleanup state transition, not reconstruction. A committed SQLite row with a missing JSON sidecar, a valid-looking but unreferenced blob, or device-level reordering still needs separate reconciliation and fault-injection evidence.
+`prune`은 먼저 DB에서 오래된 snapshot 참조를 commit한 뒤 sidecar를 지우고, 살아 있는 엔트리들이 참조하는 blob 목록을 만든 뒤 GC를 수행합니다. 중단 지점에 따라 orphan sidecar나 blob이 남을 수 있습니다. 먼저 파일을 삭제하고 DB transaction을 되돌리는 경우에는 반대로 DB가 가리키는 sidecar가 없어질 수 있으므로 순서가 중요합니다.
 
-## Failure/resource lifetime
+## advisory lock과 동시성
 
-`read` may return fewer bytes than requested or `EINTR`; `write_all` retries interruptions and partial writes. `ENOSPC`, `EIO`, fsync failure, rename failure, and close errors require explicit treatment. Each FD must be closed once on all branches. A source mutation should abort the snapshot rather than claim a stable hash. A corrupt blob must fail verification or staged-restore hash validation.
+`flock(LOCK_EX)`는 같은 lock inode를 사용하는 SRE 명령을 직렬화합니다. 잠금은 advisory입니다. 외부 `sqlite3` 도구, root, 다른 프로그램이 잠금을 지키지 않으면 경합을 막지 않습니다. lock FD가 살아 있는 동안 잠금이 유지되고 `StoreLock` destructor가 종료 시 해제합니다. thread를 사용하지 않으며 현재 읽기와 쓰기 모두 같은 배타 잠금을 씁니다.
 
-## Official references
+## 메타데이터 복원과 부분 성공
 
-- [`openat2(2)`](https://man7.org/linux/man-pages/man2/openat2.2.html) and [`path_resolution(7)`](https://man7.org/linux/man-pages/man7/path_resolution.7.html)
-- [`flock(2)`](https://man7.org/linux/man-pages/man2/flock.2.html) and [SQLite foreign-key support](https://www.sqlite.org/foreignkeys.html)
-- [`fsync(2)`](https://man7.org/linux/man-pages/man2/fsync.2.html), [`rename(2)`](https://man7.org/linux/man-pages/man2/rename.2.html), [`openat(2)`](https://man7.org/linux/man-pages/man2/openat.2.html)
-- [SQLite WAL](https://www.sqlite.org/wal.html) and [SQLite Atomic Commit](https://www.sqlite.org/atomiccommit.html)
+`fchown`은 uid/gid를 설정하고 `fchmod`는 권한 비트를 설정합니다. 소유권 변경은 일반 사용자에게 허용되지 않을 수 있으며, 소유권 변경은 setuid/setgid 비트에도 영향을 줄 수 있으므로 코드가 mode를 다시 적용합니다. `futimens`는 저장된 mtime을 설정하고 atime은 `UTIME_OMIT`로 유지합니다. 어느 하나가 실패하면 결과에 `metadata_partial`을 올립니다. 현재 테스트는 mode와 mtime만 확인했고 권한 경계별 UID/GID 복원은 확인하지 않았습니다.
+
+## 자원 수명 점검
+
+- `UniqueFd`와 `StoreLock`은 소유 FD를 destructor에서 닫습니다.
+- `fdopendir`를 사용하면 전달한 FD를 DIR이 소유하므로 원본 FD를 닫지 않도록 복제합니다.
+- SQLite statement는 `sqlite3_finalize`, DB 연결은 `sqlite3_close`로 끝내야 합니다.
+- EVP context는 `EVP_MD_CTX_new/free` 수명이 맞아야 합니다.
+- 임시 파일은 실패 경로에서 unlink해야 하며, 최종 rename 이후에는 해당 이름을 지우면 안 됩니다.
+
+## 공식 문서
+
+- [`openat2(2)`](https://man7.org/linux/man-pages/man2/openat2.2.html), [`openat(2)`](https://man7.org/linux/man-pages/man2/openat.2.html), [`path_resolution(7)`](https://man7.org/linux/man-pages/man7/path_resolution.7.html)
+- [`fsync(2)`](https://man7.org/linux/man-pages/man2/fsync.2.html), [`rename(2)`](https://man7.org/linux/man-pages/man2/rename.2.html), [`flock(2)`](https://man7.org/linux/man-pages/man2/flock.2.html), [`stat(2)`](https://man7.org/linux/man-pages/man2/stat.2.html), [`utimensat(2)`](https://man7.org/linux/man-pages/man2/utimensat.2.html)
+- [SQLite WAL](https://www.sqlite.org/wal.html), [SQLite Atomic Commit](https://www.sqlite.org/atomiccommit.html), [SQLite foreign keys](https://www.sqlite.org/foreignkeys.html)
 - [OpenSSL EVP digest API](https://docs.openssl.org/3.0/man3/EVP_DigestInit/)
