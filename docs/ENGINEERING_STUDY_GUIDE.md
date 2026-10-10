@@ -4,7 +4,7 @@
 
 Secure Recovery Engine(SRE)은 변경 전에 사용자가 명시적으로 만든 로컬 파일 스냅샷을 검증하고 복원하는 C++20 학습 프로젝트입니다. `openat2`, 파일 디스크립터 기반 경로 처리, SHA-256, SQLite 상태 관리, `fsync`와 원자적 파일 교체를 통해 Linux 시스템 프로그래밍의 보안 경계를 공부하도록 설계했습니다. 손상 후 만든 백업은 손상 전 데이터를 복구하지 못하며, 이 프로젝트는 실전 랜섬웨어 방어 제품이나 불변 백업이라고 주장하지 않습니다.
 
-구현에는 `init`, `snapshot`, `list`, `show`, `verify`, `restore`, `prune`, `doctor`가 있습니다. 2026-10-10 기준 GCC Release, Clang Release, ASan/UBSan Debug의 빌드와 CTest가 각각 통과했고 Clang 정적 분석은 진단을 내지 않았습니다. 테스트는 blob 및 manifest 손상, 복원 충돌, mode/mtime, 감사 이벤트 계약, 보존 정리, 합성 중단 상태를 다룹니다. 구현은 SRS-04 전체 완료가 아닙니다. 전원 손실·실제 강제 종료 매트릭스, 자원 고갈 fault injection, 1 GiB 성능 측정, quota, ACL/xattr, 소유권 복원 성공 조건, 트리 전체 일관성은 입증되지 않았습니다. 자동화 검증은 소유자의 개인 숙련도 증거가 아닙니다.
+구현에는 `init`, `snapshot`, `list`, `show`, `verify`, `restore`, `prune`, `doctor`가 있습니다. 2026-10-10 기준 GCC Release, Clang Release, ASan/UBSan Debug의 빌드와 CTest가 각각 통과했고 Clang 정적 분석은 진단을 내지 않았습니다. 테스트는 blob 및 manifest 손상, schema 검증형 restore 계획, 복원 충돌, mode/mtime, 감사 이벤트 계약, 보존 정리, 합성 중단 상태를 다룹니다. 구현은 SRS-04 전체 완료가 아닙니다. 전원 손실·실제 강제 종료 매트릭스, 자원 고갈 fault injection, 1 GiB 성능 측정, quota, ACL/xattr, 소유권 복원 성공 조건, 트리 전체 일관성은 입증되지 않았습니다. 자동화 검증은 소유자의 개인 숙련도 증거가 아닙니다.
 
 ## 하위 시스템이 필요한 이유
 
@@ -36,7 +36,7 @@ Secure Recovery Engine(SRE)은 변경 전에 사용자가 명시적으로 만든
 
 - `show`는 SQLite 스냅샷 행과 엔트리 집계를 JSON으로 보여 줍니다. `list`는 요약 행을 여러 개 출력합니다.
 - `verify`는 DB 엔트리와 매니페스트 sidecar의 정합성을 비교하고 각 blob이 일반 파일인지, 크기와 SHA-256이 맞는지 확인합니다.
-- `restore --dry-run`은 선택된 경로와 해시를 출력합니다. 현재 전체 충돌 계획을 계산하지는 않습니다. 실제 쓰기는 `--confirm`이 필요하고 덮어쓰기는 `--overwrite`가 추가로 필요합니다.
+- `restore --dry-run`은 dirfd/no-follow 기준으로 target 부모와 엔트리를 확인하고 create/preserve/replace/blocked 동작을 JSONL로 출력합니다. 파일별 row와 summary는 `restore-plan-v1` schema를 따르며 delete=0, writes_performed=false를 나타냅니다. 계획은 현재 상태의 관찰이므로 나중의 overwrite race를 막는 lock은 아닙니다. 실제 쓰기는 `--confirm`, 기존 항목 교체는 `--overwrite`가 필요합니다.
 - `restore_one`은 대상 디렉터리 FD 아래에 부모를 만들고 같은 디렉터리에 임시 파일을 만듭니다. blob을 복사하고 staged 파일의 크기·해시를 검사한 뒤 mode/소유권/mtime을 가능한 범위에서 적용하고 `renameat2`로 파일 하나를 설치합니다.
 - `prune`은 retention 밖의 DB 행을 트랜잭션으로 삭제하고 sidecar를 제거한 후 여전히 참조되지 않는 blob을 수집합니다. 같은 blob을 다른 스냅샷이 참조하면 남깁니다.
 

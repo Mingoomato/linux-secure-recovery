@@ -17,7 +17,7 @@
 | SRE-FR-007 | `COPYING → VERIFIED → COMMITTED`, `doctor` stale-state 회수 | 합성 `COPYING`/`VERIFIED` 회수 확인; 실제 crash 미검증 |
 | SRE-FR-008 | `manifest.v1`, DB와 canonical sidecar 일치 및 해시 | schema·무결성 hash smoke 통과 |
 | SRE-FR-009 | blob hash/크기와 sidecar 정합성 검증 | corrupt blob/manifest 각 restore 거부 확인 |
-| SRE-FR-010 | dry-run 경로/digest 출력 | 기본 동작 확인; 충돌·생성·삭제 정책 전체 사전 계획은 미구현 |
+| SRE-FR-010 | schema형 JSONL dry-run 계획: 항목별 생성/보존/교체/차단 및 delete=0 | 빈 target, 정규 파일·symlink·directory 충돌, overwrite 계획과 no-write 상태를 smoke/schema로 확인; 계획 이후 경합과 fault gate는 별도 |
 | SRE-FR-011 | `--confirm`, `--overwrite`, 기존 파일 기본 보호 | 기본 conflict 및 confirm restore smoke; confirm 누락 전용 시나리오 보강 필요 |
 | SRE-FR-012 | 같은 디렉터리 temp, 해시 확인, `renameat2`, directory fsync | bytes 복원 확인; 설치 후 재해시/경합 매트릭스는 미검증 |
 | SRE-FR-013 | mode, uid/gid, mtime 복원 시도와 partial 결과 | mode/mtime smoke 확인; UID/GID 특권 경계 미시험 |

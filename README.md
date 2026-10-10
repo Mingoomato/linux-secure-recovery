@@ -11,7 +11,7 @@ SRE는 사용자가 변경 전에 만든 로컬 파일 snapshot을 보관하고,
 ### 기능
 
 - 명령: `init`, `snapshot`, `list`, `show`, `verify`, `restore`, `prune`, `doctor`
-- `restore --dry-run`은 선택된 경로와 digest를 출력합니다. 실제 쓰기에는 `--confirm`, 기존 파일 교체에는 추가로 `--overwrite`가 필요합니다.
+- `restore --dry-run`은 항목별 생성·기존 대상 보존·교체·차단 계획과 요약을 JSON Lines로 출력합니다. dry-run은 target을 쓰거나 삭제하지 않습니다. 실제 쓰기에는 `--confirm`, 기존 파일 교체에는 추가로 `--overwrite`가 필요합니다. 계획은 현재 시점의 관찰이므로 실제 복원에서는 경합·권한·저장소 오류가 별도로 발생할 수 있습니다.
 - 일반 파일만 처리하며 symlink, 특수 파일, 다른 device 항목은 제외합니다. 파일 크기 상한은 1 GiB이고 JSON 경로 계약에 맞지 않는 invalid UTF-8 파일 이름은 snapshot 실패로 처리합니다.
 - mode, uid/gid, mtime을 저장합니다. 복원 시 mode와 mtime을 적용하며, uid/gid 적용 권한이 없으면 부분 메타데이터 상태를 보고합니다.
 - 작업 이벤트를 hard link를 거부하는 로컬 NDJSON 감사 파일에 기록하고 `operation.v1` 스키마로 계약을 정의합니다. Snapshot 데이터가 commit된 뒤 감사 기록이 실패할 수 있으므로 오류 종료가 자동 rollback을 뜻하지 않습니다.
@@ -38,7 +38,7 @@ mkdir -p "$HOME/recovery-lab" "$HOME/.local/share/sre-store" "$HOME/recovery-tar
 
 ### 검증과 현재 한계
 
-GCC Release, Clang Release, Clang 정적 분석, ASan/UBSan Debug의 로컬 빌드와 CTest가 통과했습니다. 스모크 검증은 snapshot 상세 조회, blob/sidecar 손상 검출과 복원 거부, dry-run, 기존 파일 충돌, 파일 내용 및 mode/mtime 복원, 감사 JSON Schema·권한·건수·바이트 수, prune과 공유 blob 보존, 합성 중단 상태의 `doctor`, 저장소 잠금 대기를 확인합니다. 자세한 기록은 [`docs/TEST_RESULTS.md`](docs/TEST_RESULTS.md)와 [`docs/REQUIREMENTS_TRACEABILITY.md`](docs/REQUIREMENTS_TRACEABILITY.md)에 있습니다.
+GCC Release, Clang Release, Clang 정적 분석, ASan/UBSan Debug의 로컬 빌드와 CTest가 통과했습니다. 스모크 검증은 snapshot 상세 조회, blob/sidecar 손상 검출과 복원 거부, schema 검증을 포함한 dry-run 충돌 계획, 실제 파일 내용 및 mode/mtime 복원, 감사 JSON Schema·권한·건수·바이트 수, prune과 공유 blob 보존, 합성 중단 상태의 `doctor`, 저장소 잠금 대기를 확인합니다. 자세한 기록은 [`docs/TEST_RESULTS.md`](docs/TEST_RESULTS.md)와 [`docs/REQUIREMENTS_TRACEABILITY.md`](docs/REQUIREMENTS_TRACEABILITY.md)에 있습니다.
 
 실제 프로세스/전원 손실 crash matrix, ENOSPC/EIO/EACCES fault injection, 원본 동시 변경, 1 GiB 성능 측정과 복수 배포판 검증은 수행하지 않았습니다. quota, ACL/xattr, 트리 전체 일관성, 원격/암호화 백업은 구현되지 않았습니다. 저장소는 root나 같은 사용자의 변조, 잠금을 따르지 않는 프로그램, 같은 디스크 고장에 대한 보호를 제공하지 않습니다. 복원은 파일별로 이루어져 일부만 성공할 수 있습니다.
 
@@ -51,7 +51,7 @@ SRE is an educational Linux project for storing user-created local snapshots mad
 ### Features
 
 - Commands: `init`, `snapshot`, `list`, `show`, `verify`, `restore`, `prune`, and `doctor`.
-- `restore --dry-run` lists selected paths and digests. Writes require `--confirm`; replacing an existing file also requires `--overwrite`.
+- `restore --dry-run` emits a per-entry create/preserve/replace/blocked plan and summary as JSON Lines. It does not write or delete target files. Writes require `--confirm`; replacing an existing file also requires `--overwrite`. The plan is a point-in-time observation; races, permissions, or storage failures can still affect a later restore.
 - Only regular files are processed. Symlinks, special files, entries on another device, files over 1 GiB, and invalid UTF-8 path names are rejected or excluded.
 - Mode, uid/gid, and mtime are stored. Restore applies mode and mtime; unavailable uid/gid privileges are reported as partial metadata restoration.
 - Local NDJSON operation audit records follow the `operation.v1` schema and reject hard-linked log files. Audit writing may fail after snapshot data is committed, so a command error does not imply an automatic rollback.
@@ -78,6 +78,6 @@ mkdir -p "$HOME/recovery-lab" "$HOME/.local/share/sre-store" "$HOME/recovery-tar
 
 ### Verification and limitations
 
-GCC Release, Clang Release, Clang static analysis, and ASan/UBSan Debug builds and local CTest runs passed. The smoke suite checks snapshot details, corrupt blob/sidecar detection and restore refusal, dry-run, existing-file conflicts, restored bytes and mode/mtime, audit schema/permissions/counts/bytes, prune with shared-blob retention, synthetic interrupted-state recovery, and lock waiting. See [`docs/TEST_RESULTS.md`](docs/TEST_RESULTS.md) and [`docs/REQUIREMENTS_TRACEABILITY.md`](docs/REQUIREMENTS_TRACEABILITY.md).
+GCC Release, Clang Release, Clang static analysis, and ASan/UBSan Debug builds and local CTest runs passed. The smoke suite checks snapshot details, corrupt blob/sidecar detection and restore refusal, schema-validated dry-run conflict plans, restored bytes and mode/mtime, audit schema/permissions/counts/bytes, prune with shared-blob retention, synthetic interrupted-state recovery, and lock waiting. See [`docs/TEST_RESULTS.md`](docs/TEST_RESULTS.md) and [`docs/REQUIREMENTS_TRACEABILITY.md`](docs/REQUIREMENTS_TRACEABILITY.md).
 
 Real process/power-loss crash matrices, ENOSPC/EIO/EACCES fault injection, concurrent source mutation, a 1 GiB benchmark, and multi-distribution verification have not been run. Quota, ACL/xattr, whole-tree consistency, remote storage, and encryption are not implemented. The local store does not protect against root or same-user tampering, programs that ignore its advisory lock, or failure of the same disk. Restore is per file and may partially complete.

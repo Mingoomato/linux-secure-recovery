@@ -25,7 +25,8 @@
 - symlink source root 거부, 3개 정규 파일 snapshot, 파일 메타데이터와 `show` 집계.
 - 유효한 UTF-8 Unicode 파일 이름 복원 및 잘못된 UTF-8 이름의 snapshot 거부.
 - 매니페스트 및 blob 변조 시 검증 실패, 손상된 snapshot의 restore 거부, 기존 대상 보존.
-- dry-run 비쓰기, 기본 충돌 보존, 실제 파일 복원, mode와 nanosecond mtime 보존.
+- `restore-plan-v1` Draft 2020-12 schema와 JSONL 레코드 검증. 빈 target 생성 계획, 기존 regular file/symlink/directory 보존, `--overwrite`의 regular file/symlink 교체 및 directory 차단을 확인. 두 dry-run 모두 target에 쓰거나 삭제하지 않았고, 차단 계획은 exit 2로 알립니다.
+- 기본 충돌 보존, 실제 파일 복원, mode와 nanosecond mtime 보존.
 - audit NDJSON 각 이벤트 계약, 0600 파일 모드, snapshot/restore/prune 건수와 byte count.
 - hard-linked audit target 거부 및 외부 sentinel 불변 확인. 이 경우 snapshot DB 상태는 이미 `COMMITTED`일 수 있어 로그 실패와 데이터 commit을 구분합니다.
 - prune 이후 다른 snapshot이 참조하는 공유 blob의 유지.
@@ -44,7 +45,7 @@
 - 2개 이상 배포판 및 파일시스템/마운트 옵션 조합.
 - quota 지원과 quota/GC 경쟁 검증.
 - uid/gid 복원 권한 별 성공 테스트, ACL/xattr 보존.
-- `restore --dry-run`의 전체 충돌 계획, 파일 설치 후 재해시, cross-filesystem/특수 파일시스템 제한 테스트.
+- 계획 이후 overwrite race, 파일 설치 후 재해시, cross-filesystem/특수 파일시스템 제한 테스트.
 - fuzzing 및 SRS가 요구하는 100개 fault point.
 
 이 범위 때문에 SRS-04 DoD는 충족으로 표시하지 않습니다. CTest, sanitizer, analyzer는 이 문서에 적힌 테스트 범위의 근거이며 사용자 숙련도를 증명하지 않습니다.

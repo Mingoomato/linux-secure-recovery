@@ -18,6 +18,8 @@
 
 복원은 대상과 같은 디렉터리에 임시 파일을 만들기 때문에 `renameat2`가 같은 파일시스템 안에서 하나의 이름 변경을 원자적으로 수행할 수 있습니다. `RENAME_NOREPLACE`는 덮어쓰기를 허용하지 않는 모드에서 마지막 경합을 방어합니다. `--overwrite`는 기존 대상 이름을 교체할 수 있습니다. 원자성은 파일 하나에만 해당하고 여러 파일을 하나의 트랜잭션으로 만들지 않습니다.
 
+`restore --dry-run`은 target root FD를 복제하고 각 기존 부모를 `openat(O_DIRECTORY|O_NOFOLLOW)`로 확인합니다. 마지막 이름은 `fstatat(..., AT_SYMLINK_NOFOLLOW)`로 조사하므로 기존 symlink의 목적지를 열지 않습니다. 디렉터리 부모가 없으면 필요한 나머지 부모 수를 계획에 기록하고, symlink/non-directory 부모와 `--overwrite` 대상 directory는 차단 항목으로 표시합니다. 이 검사는 target tree에 쓰지 않지만 작업 전후를 잠그지 않으므로 실제 `restore`까지 대상이 그대로라고 보장하지 않습니다. Plan JSONL은 경로 문자열과 상태 enum, 계획 크기, 충돌 action 및 errno를 보존하고 schema로 확인합니다.
+
 ## SQLite 트랜잭션과 파일시스템
 
 연결은 WAL과 `synchronous=FULL`을 설정하고 외래 키를 활성화합니다. Snapshot 상태는 `COPYING → VERIFIED → COMMITTED`로 진행합니다. SQLite transaction은 SQLite DB 안의 행을 원자적으로 다루지만 blob 파일과 JSON sidecar를 함께 묶는 분산 트랜잭션은 아닙니다. 코드의 순서와 `doctor` 복구 규칙은 상태를 해석하기 위한 것이며, crash/power-loss 매트릭스로 검증된 보장은 아닙니다.

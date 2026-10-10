@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/linux-secure-recovery/restore-plan-v1.schema.json",
+  "title": "SRE Restore Plan v1",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["type", "path", "sha256", "size", "parent_state", "missing_parent_count", "target_state", "action", "inspection_errno"],
+      "properties": {
+        "type": {"const": "restore_plan_entry"},
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "size": {"type": "integer", "minimum": 0},
+        "parent_state": {"enum": ["present", "missing", "blocked_symlink", "blocked_non_directory", "unreadable"]},
+        "missing_parent_count": {"type": "integer", "minimum": 0},
+        "target_state": {"enum": ["absent", "regular_file", "symlink", "directory", "other", "unreachable", "unknown"]},
+        "action": {"enum": ["create", "preserve_conflict", "replace", "blocked", "blocked_directory", "inspection_failed"]},
+        "inspection_errno": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type", "dry_run", "overwrite", "entry_count", "would_create", "would_replace", "preserved_conflicts", "blocked", "inspection_errors", "deletes", "writes_performed"],
+      "properties": {
+        "type": {"const": "restore_plan_summary"},
+        "dry_run": {"const": true},
+        "overwrite": {"type": "boolean"},
+        "entry_count": {"type": "integer", "minimum": 0},
+        "would_create": {"type": "integer", "minimum": 0},
+        "would_replace": {"type": "integer", "minimum": 0},
+        "preserved_conflicts": {"type": "integer", "minimum": 0},
+        "blocked": {"type": "integer", "minimum": 0},
+        "inspection_errors": {"type": "integer", "minimum": 0},
+        "deletes": {"const": 0},
+        "writes_performed": {"const": false}
+      },
+      "additionalProperties": false
+    }
+  ]
+}

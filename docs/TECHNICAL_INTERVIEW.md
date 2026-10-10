@@ -20,7 +20,7 @@
 11. `prune`의 DB commit 직후 프로세스가 끝나면 어떤 sidecar나 blob이 남을 수 있습니까?
 12. stale `VERIFIED` 행은 왜 자동으로 `COMMITTED`로 승격되지 않습니까?
 13. smoke test의 합성 stale-state fixture가 실제 전원 손실 복구를 입증하지 못하는 이유는 무엇입니까?
-14. `restore --dry-run`이 현재 미리 계산하지 않는 충돌 정보는 무엇입니까?
+14. `restore --dry-run`의 target plan이 point-in-time 관찰인 이유는 무엇이며, `--overwrite`를 실제 적용할 때 어떤 경쟁 조건이 남습니까?
 15. 외부 프로세스가 원본을 복사 중 변경하면 어떤 파일은 안정적이어도 트리 snapshot이 혼합 시점이 될 수 있는 이유는 무엇입니까?
 
 ## 보안 추론

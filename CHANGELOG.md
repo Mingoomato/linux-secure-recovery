@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `restore --dry-run`에 schema 검증 가능한 항목별 생성/보존/교체/차단 계획과 요약을 추가했습니다. target에 쓰거나 삭제하지 않으며, 실제 적용 전까지 경쟁 상태가 바뀔 수 있음을 문서화했습니다.
+- GCC/Clang Release, ASan/UBSan Debug, Clang 정적 분석 및 혼합 충돌 계획 회귀를 통과했습니다.
+
 ## 0.1.0 — 2026-10-10
 
 - SRS-04 기반 교육용 snapshot, verify, restore, retention, recovery CLI를 추가했습니다.

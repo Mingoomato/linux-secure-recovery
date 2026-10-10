@@ -83,6 +83,62 @@ cp "$tmp/manifest-backup.json" "$tmp/store/manifests/$snapshot_id.json"
 
 "$bin" restore --store "$tmp/store" --snapshot "$snapshot_id" --target "$tmp/target-dry" --dry-run >"$tmp/dry.json"
 [ ! -e "$tmp/target-dry/nested/data.txt" ]
+python3 - "$tmp/dry.json" "$root_dir/contracts/restore-plan-v1.schema.json" <<'PY'
+import json, pathlib, sys
+from jsonschema import Draft202012Validator
+schema = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+Draft202012Validator.check_schema(schema)
+validate = Draft202012Validator(schema).validate
+records = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()]
+for record in records:
+    validate(record)
+entries = [item for item in records if item["type"] == "restore_plan_entry"]
+summary = next(item for item in records if item["type"] == "restore_plan_summary")
+assert len(entries) == 3 and all(item["action"] == "create" for item in entries)
+assert summary["entry_count"] == 3 and summary["would_create"] == 3
+assert summary["would_replace"] == summary["preserved_conflicts"] == 0
+assert summary["deletes"] == 0 and summary["writes_performed"] is False
+PY
+mkdir -p "$tmp/target-plan/nested"
+mkdir -p "$tmp/target-plan/nested/한글.txt"
+printf 'keep existing regular file\n' >"$tmp/target-plan/nested/data.txt"
+ln -s "$tmp/external.txt" "$tmp/target-plan/nested/back\\slash.txt"
+"$bin" restore --store "$tmp/store" --snapshot "$snapshot_id" --target "$tmp/target-plan" --dry-run >"$tmp/plan-preserve.jsonl"
+set +e
+"$bin" restore --store "$tmp/store" --snapshot "$snapshot_id" --target "$tmp/target-plan" --dry-run --overwrite >"$tmp/plan-overwrite.jsonl"
+plan_rc=$?
+set -e
+[ "$plan_rc" -eq 2 ]
+python3 - "$tmp/plan-preserve.jsonl" "$tmp/plan-overwrite.jsonl" "$root_dir/contracts/restore-plan-v1.schema.json" <<'PY'
+import json, pathlib, sys
+from jsonschema import Draft202012Validator
+schema = json.loads(pathlib.Path(sys.argv[3]).read_text(encoding="utf-8"))
+Draft202012Validator.check_schema(schema)
+def read_plan(path):
+    records = [json.loads(line) for line in pathlib.Path(path).read_text(encoding="utf-8").splitlines()]
+    validate = Draft202012Validator(schema).validate
+    for record in records:
+        validate(record)
+    entries = {item["path"]: item for item in records if item["type"] == "restore_plan_entry"}
+    summary = next(item for item in records if item["type"] == "restore_plan_summary")
+    return entries, summary
+preserve, preserve_summary = read_plan(sys.argv[1])
+overwrite, overwrite_summary = read_plan(sys.argv[2])
+assert preserve["nested/data.txt"]["action"] == "preserve_conflict"
+assert preserve["nested/back\\slash.txt"]["action"] == "preserve_conflict"
+assert preserve["nested/한글.txt"]["action"] == "preserve_conflict"
+assert preserve_summary["preserved_conflicts"] == 3 and preserve_summary["would_create"] == 0
+assert overwrite["nested/data.txt"]["action"] == "replace"
+assert overwrite["nested/back\\slash.txt"]["action"] == "replace"
+assert overwrite["nested/한글.txt"]["action"] == "blocked_directory"
+assert overwrite_summary["would_replace"] == 2 and overwrite_summary["would_create"] == 0
+assert overwrite_summary["blocked"] == 1
+for summary in (preserve_summary, overwrite_summary):
+    assert summary["deletes"] == 0 and summary["writes_performed"] is False
+PY
+grep -q 'keep existing regular file' "$tmp/target-plan/nested/data.txt"
+[ -L "$tmp/target-plan/nested/back\\slash.txt" ]
+grep -q 'do not follow' "$tmp/external.txt"
 printf 'existing bytes\n' >"$tmp/target-conflict/nested/data.txt"
 "$bin" restore --store "$tmp/store" --snapshot "$snapshot_id" --target "$tmp/target-conflict" --confirm >"$tmp/conflict.json"
 grep -q 'existing bytes' "$tmp/target-conflict/nested/data.txt"

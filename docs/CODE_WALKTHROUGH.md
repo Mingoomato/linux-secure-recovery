@@ -28,7 +28,7 @@
 
 ## restore 흐름
 
-`cmd_restore`는 sidecar가 DB와 맞는지 우선 검사합니다. dry-run은 각 상대 경로와 digest를 출력하지만 전체 target 충돌 계획을 계산하지 않습니다. 실제 복원은 `--confirm`을 요구합니다. 기존 파일이 있으면 기본 동작은 건너뛰며 `--overwrite`일 때만 교체합니다.
+`cmd_restore`는 sidecar가 DB와 맞는지 우선 검사합니다. dry-run은 dirfd 기준으로 부모 경로를 symlink-follow 없이 살피고 항목별 JSONL 계획을 출력합니다. 없는 대상은 create, 기존 대상은 기본 preserve, `--overwrite` 대상은 replace, symlink/non-directory 부모와 overwrite 대상 directory는 blocked로 분류합니다. 요약은 삭제 0건과 target write 미실행을 기록하며 계획 레코드는 별도 Draft 2020-12 schema로 검증됩니다. 이 관찰은 시점이 고정된 예약이 아닙니다. 실제 복원은 `--confirm`을 요구하고, no-overwrite 설치는 `RENAME_NOREPLACE`로 충돌을 다시 확인하지만, overwrite 시점의 대상은 계획 후 달라질 수 있습니다.
 
 `ensure_parent`는 root FD를 복제해 `mkdirat`와 `openat(O_DIRECTORY|O_NOFOLLOW)`로 대상 부모를 단계별로 엽니다. `restore_one`은 blob을 열고 대상 디렉터리에 고유 임시 파일을 만듭니다. 내용을 복사하고 파일을 `fsync`, 다시 열어 크기와 SHA-256을 확인한 다음 mode·uid/gid·mtime 적용을 시도합니다. metadata 적용 실패는 복원 파일 자체를 실패로 취급하지 않고 `metadata_partial` 결과로 나타납니다. `renameat2`로 하나의 파일을 설치하고 inode 확인 및 부모 디렉터리 `fsync`를 수행합니다. 트리 전체가 all-or-nothing이라고 보장하지 않습니다.
 

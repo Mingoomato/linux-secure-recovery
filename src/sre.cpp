@@ -880,6 +880,99 @@ int ensure_parent(int rootfd, const std::string &path) {
     return current;
 }
 
+struct RestorePlanItem {
+    std::string parent_state = "present";
+    std::string target_state = "unknown";
+    std::string action = "inspection_failed";
+    std::size_t missing_parent_count = 0;
+    int inspection_errno = 0;
+};
+
+RestorePlanItem inspect_restore_target(int rootfd, const Entry &entry, bool overwrite) {
+    RestorePlanItem result;
+    if (!safe_relative_path(entry.path)) {
+        result.inspection_errno = EINVAL;
+        return result;
+    }
+    std::vector<std::string> components;
+    std::size_t start = 0;
+    while (start < entry.path.size()) {
+        const std::size_t slash = entry.path.find('/', start);
+        components.push_back(entry.path.substr(start,
+            slash == std::string::npos ? slash : slash - start));
+        if (slash == std::string::npos) break;
+        start = slash + 1U;
+    }
+    if (components.empty()) {
+        result.inspection_errno = EINVAL;
+        return result;
+    }
+
+    int current = dup(rootfd);
+    if (current < 0) {
+        result.inspection_errno = errno;
+        return result;
+    }
+    const std::size_t parent_count = components.size() - 1U;
+    for (std::size_t i = 0; i < parent_count; ++i) {
+        int next = openat(current, components[i].c_str(),
+                          O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (next < 0) {
+            const int open_error = errno;
+            struct stat component_stat {};
+            if (fstatat(current, components[i].c_str(), &component_stat,
+                        AT_SYMLINK_NOFOLLOW) == 0) {
+                if (S_ISLNK(component_stat.st_mode)) result.parent_state = "blocked_symlink";
+                else if (!S_ISDIR(component_stat.st_mode))
+                    result.parent_state = "blocked_non_directory";
+                else {
+                    result.parent_state = "unreadable";
+                    result.inspection_errno = open_error;
+                }
+                if (result.parent_state.starts_with("blocked_")) {
+                    result.target_state = "unreachable";
+                    result.action = "blocked";
+                }
+            } else if (errno == ENOENT) {
+                result.parent_state = "missing";
+                result.target_state = "unreachable";
+                result.action = "create";
+                result.missing_parent_count = parent_count - i;
+            } else {
+                result.parent_state = "unreadable";
+                result.inspection_errno = errno;
+            }
+            close(current);
+            return result;
+        }
+        close(current);
+        current = next;
+    }
+
+    struct stat target_stat {};
+    if (fstatat(current, components.back().c_str(), &target_stat,
+                AT_SYMLINK_NOFOLLOW) != 0) {
+        if (errno == ENOENT) {
+            result.target_state = "absent";
+            result.action = "create";
+        } else {
+            result.inspection_errno = errno;
+        }
+        close(current);
+        return result;
+    }
+    close(current);
+
+    if (S_ISREG(target_stat.st_mode)) result.target_state = "regular_file";
+    else if (S_ISLNK(target_stat.st_mode)) result.target_state = "symlink";
+    else if (S_ISDIR(target_stat.st_mode)) result.target_state = "directory";
+    else result.target_state = "other";
+    if (!overwrite) result.action = "preserve_conflict";
+    else if (S_ISDIR(target_stat.st_mode)) result.action = "blocked_directory";
+    else result.action = "replace";
+    return result;
+}
+
 int restore_one(int targetfd, const std::string &store, const Entry &e, bool overwrite) {
     std::size_t slash = e.path.find_last_of('/');
     std::string parent = slash == std::string::npos ? "" : e.path.substr(0, slash);
@@ -979,11 +1072,35 @@ int cmd_restore(const std::string &store, const std::string &id, const std::stri
     int conflicts = 0, restored = 0, failed = 0, metadata_partial = 0;
     const std::uint64_t planned_bytes = total_bytes(entries);
     std::uint64_t restored_bytes = 0;
-    for (const auto &e : entries) {
-        if (dry) {
-            std::cout << "restore " << e.path << " sha256=" << e.hash << '\n';
-            continue;
+    if (dry) {
+        std::size_t would_create = 0, would_replace = 0, preserved = 0;
+        std::size_t blocked = 0, inspection_errors = 0;
+        for (const auto &e : entries) {
+            const RestorePlanItem item = inspect_restore_target(targetfd, e, overwrite);
+            std::cout << "{\"type\":\"restore_plan_entry\",\"path\":" << json_quote(e.path)
+                      << ",\"sha256\":" << json_quote(e.hash) << ",\"size\":" << e.size
+                      << ",\"parent_state\":" << json_quote(item.parent_state)
+                      << ",\"missing_parent_count\":" << item.missing_parent_count
+                      << ",\"target_state\":" << json_quote(item.target_state)
+                      << ",\"action\":" << json_quote(item.action)
+                      << ",\"inspection_errno\":" << item.inspection_errno << "}\n";
+            if (item.action == "create") ++would_create;
+            else if (item.action == "replace") ++would_replace;
+            else if (item.action == "preserve_conflict") ++preserved;
+            else if (item.action == "blocked" || item.action == "blocked_directory") ++blocked;
+            else ++inspection_errors;
         }
+        close(targetfd);
+        audit(store, "restore_dry_run", id, entries.size(), planned_bytes, false);
+        std::cout << "{\"type\":\"restore_plan_summary\",\"dry_run\":true,\"overwrite\":"
+                  << (overwrite ? "true" : "false") << ",\"entry_count\":" << entries.size()
+                  << ",\"would_create\":" << would_create << ",\"would_replace\":" << would_replace
+                  << ",\"preserved_conflicts\":" << preserved << ",\"blocked\":" << blocked
+                  << ",\"inspection_errors\":" << inspection_errors
+                  << ",\"deletes\":0,\"writes_performed\":false}\n";
+        return (blocked || inspection_errors) ? 2 : 0;
+    }
+    for (const auto &e : entries) {
         int rc = restore_one(targetfd, store, e, overwrite);
         if (rc == 1) { std::cout << "conflict " << e.path << '\n'; ++conflicts; }
         else if (rc == 2) { ++restored; ++metadata_partial; restored_bytes += e.size; }
@@ -991,12 +1108,10 @@ int cmd_restore(const std::string &store, const std::string &id, const std::stri
         else { ++restored; restored_bytes += e.size; }
     }
     close(targetfd);
-    audit(store, dry ? "restore_dry_run" : "restore", id,
-          dry ? entries.size() : static_cast<std::size_t>(restored),
-          dry ? planned_bytes : restored_bytes, confirm);
+    audit(store, "restore", id, static_cast<std::size_t>(restored), restored_bytes, confirm);
     std::cout << "{\"restored\":" << restored << ",\"conflicts\":" << conflicts
               << ",\"metadata_partial\":" << metadata_partial
-              << ",\"failed\":" << failed << ",\"dry_run\":" << (dry ? "true" : "false") << "}\n";
+              << ",\"failed\":" << failed << ",\"dry_run\":false}\n";
     return (failed || metadata_partial) ? 2 : 0;
 }
 
