@@ -6,6 +6,8 @@
 
 `readdir`는 이름을 열거할 뿐 해당 파일을 안전하게 열었다는 뜻은 아닙니다. SRE는 `fstatat(..., AT_SYMLINK_NOFOLLOW)`로 종류를 확인한 다음 루트 FD에서 다시 상대 경로를 엽니다. 현재 `st_dev` 비교는 다른 device를 건너뛰는 제한된 정책이며 동일 device bind mount 전체를 식별하는 정책은 아닙니다.
 
+디렉터리의 경우 `scan_tree`는 `fstatat`의 device/inode와 `openat2`로 연 FD의 `fstat` device/inode를 비교합니다. 이름이 검사와 열기 사이에 다른 디렉터리로 교체된 상황을 실패로 분류합니다. 지원하지 않는 symlink/특수 항목은 `AT_SYMLINK_NOFOLLOW`의 metadata만 읽고 link target이나 device/socket/FIFO 내용을 열지 않습니다. `--exclude-extension`은 일반 파일을 열기 전에 basename을 검사하므로 선택한 확장자의 내용은 blob에 들어가지 않습니다.
+
 그 전에 `src/path_safety.hpp`의 `safe_relative_path(std::string_view)`가 길이, 선행 slash, NUL, 빈 구성요소, `.`/`..`, `NAME_MAX`를 검사합니다. 이 검사는 syscall 기반 containment보다 얕은 문법 검증입니다. `load_entries`가 SQLite TEXT를 복사할 때 `sqlite3_column_bytes`를 사용하므로 NUL 뒤의 바이트도 사라지지 않고 검사 대상에 포함됩니다. `cmd_init`도 source/store 경로 overlap을 새 store 생성 전에 검사해 거부 동작의 부작용을 줄입니다.
 
 ## 파일 안정성, 해시, 메모리
@@ -14,13 +16,19 @@
 
 파일 내용은 고정 크기 버퍼로 흘려 보내면서 OpenSSL EVP SHA-256 context를 갱신합니다. 메모리 사용량은 파일 전체 크기 대신 버퍼 크기와 일부 메타데이터 목록에 주로 비례합니다. SHA-256은 데이터가 예상 digest와 같은지 확인할 뿐, 생성자 신원·진본성·암호화를 제공하지 않습니다.
 
+`observed_at_ns`는 안정성 비교가 끝난 직후 `system_clock`에서 읽은 Unix epoch nanoseconds입니다. 운영체제 wall clock은 조정될 수 있으므로 이 값은 순서 보장용 monotonic clock이나 트리 전체 snapshot timestamp가 아닙니다. 기존 DB에는 SQLite schema migration으로 컬럼을 추가하고 기본값 0을 사용해, 과거 manifest를 다시 생성할 때 새 필드를 임의로 붙이지 않습니다.
+
 ## 임시 파일, `fsync`, rename
 
 새 blob은 전용 temp 디렉터리에 `O_CREAT|O_EXCL|O_NOFOLLOW`로 만듭니다. `write`는 짧게 쓰거나 `EINTR`로 실패할 수 있으므로 `write_all`이 진행 상태를 추적합니다. 파일에 `fsync`를 수행한 뒤 rename하고 상위 shard 디렉터리도 `fsync`합니다. 파일 `fsync`는 내용과 inode 메타데이터를 저장 장치 계층으로 밀어내고, 디렉터리 `fsync`는 새 이름의 디렉터리 엔트리를 내구성 있게 기록하는 데 필요합니다. 실제 보장은 파일시스템, 마운트 옵션, 장치 캐시와 커널에 따라 달라 실제 전원 장애 검증 없이는 확정할 수 없습니다.
 
 복원은 대상과 같은 디렉터리에 임시 파일을 만들기 때문에 `renameat2`가 같은 파일시스템 안에서 하나의 이름 변경을 원자적으로 수행할 수 있습니다. `RENAME_NOREPLACE`는 덮어쓰기를 허용하지 않는 모드에서 마지막 경합을 방어합니다. `--overwrite`는 기존 대상 이름을 교체할 수 있습니다. 원자성은 파일 하나에만 해당하고 여러 파일을 하나의 트랜잭션으로 만들지 않습니다.
 
+rename 이후에도 새 경로를 `openat(O_NOFOLLOW)`로 다시 열어 설치된 inode, 크기, SHA-256을 확인합니다. `fstat` 전후 안정성 확인은 해시 계산 중 같은 열린 inode의 변화를 찾고, `fstatat(..., AT_SYMLINK_NOFOLLOW)`는 검사 끝에 해당 이름이 여전히 같은 inode를 가리키는지 확인합니다. 이 검사 또는 directory `fsync`가 실패하면 이미 파일 이름 교체가 일어난 뒤일 수 있으므로 오류 결과가 자동 rollback을 뜻하지 않습니다.
+
 `restore --dry-run`은 target root FD를 복제하고 각 기존 부모를 `openat(O_DIRECTORY|O_NOFOLLOW)`로 확인합니다. 마지막 이름은 `fstatat(..., AT_SYMLINK_NOFOLLOW)`로 조사하므로 기존 symlink의 목적지를 열지 않습니다. 디렉터리 부모가 없으면 필요한 나머지 부모 수를 계획에 기록하고, symlink/non-directory 부모와 `--overwrite` 대상 directory는 차단 항목으로 표시합니다. 이 검사는 target tree에 쓰지 않지만 작업 전후를 잠그지 않으므로 실제 `restore`까지 대상이 그대로라고 보장하지 않습니다. Plan JSONL은 경로 문자열과 상태 enum, 계획 크기, 충돌 action 및 errno를 보존하고 schema로 확인합니다.
+
+빈 디렉터리도 `directories` 계획에 포함됩니다. directory 계획 함수는 `openat`와 `fstatat`만 사용하여 target을 바꾸지 않고, 실제 적용 경로의 `restore_directory`만 `mkdirat`로 생성합니다. 기존 directory는 보존하고 같은 이름의 symlink나 일반 파일은 실패시킵니다. 현재 directory mode, owner, timestamp는 저장하거나 적용하지 않으며 file metadata와 구분해야 합니다.
 
 ## SQLite 트랜잭션과 파일시스템
 

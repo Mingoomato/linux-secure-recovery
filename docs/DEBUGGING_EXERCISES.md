@@ -22,15 +22,15 @@
 
 **완료 기준:** sentinel은 바뀌지 않습니다. 결과는 committed 데이터와 audit 기록 실패를 구분할 수 있어야 하며, 테스트가 임시 디렉터리 밖을 건드리지 않습니다.
 
-## 과제 3 — SRS의 `show` 조회를 확장
+## 과제 3 — 디렉터리 메타데이터 보존 설계
 
-**목표:** `sre show --store STORE --snapshot ID`가 committed/failed 상태와 파일 수·총 크기를 안전하게 요약하도록 독립적으로 개선합니다.
+**목표:** 현재 path-only directory manifest를 mode, uid/gid, mtime을 포함하는 계약으로 확장하고 복원 결과의 partial metadata 상태를 다룹니다.
 
-**읽을 위치:** `cmd_show`, SQLite 쿼리 준비/바인딩/정리, `json_quote`, `tests/smoke.sh`.
+**읽을 위치:** `DirectoryEntry`, `directory_entries`, `manifest_document`, `restore_directory`, `contracts/manifest-v1.schema.json`, `tests/smoke.sh`.
 
-누락된 ID, 내부 sentinel ID, 빈 snapshot, 오래된 FAILED snapshot을 포함한 테스트를 추가합니다. 출력은 한 줄 JSON으로 유지하고 문자열 값은 JSON 계약에 맞춰 인코딩합니다.
+하위 디렉터리, 빈 디렉터리, 이미 존재하는 target directory, 쓰기 권한이 부족한 target을 포함하는 fixture를 구성하세요. 자식 파일 설치 뒤 디렉터리 시간을 적용하는 순서, 소유권 변경이 거부되는 경우, umask 영향을 설명하고 검증 가능한 결과 계약을 설계하세요.
 
-**완료 기준:** 정상 출력은 실제 DB 집계와 일치하고, 잘못된 ID·누락된 snapshot은 성공처럼 보이지 않습니다. SQLite statement와 연결은 모든 경로에서 정리됩니다.
+**완료 기준:** manifest schema와 DB sidecar 정합성이 유지되고, 허용된 메타데이터는 정확히 복원되며, 거부된 metadata 적용은 명시적 partial 결과가 됩니다. 기존 파일 보호와 target 밖 경로 불변 조건을 회귀 시험으로 보존합니다.
 
 ## 시도 기록
 

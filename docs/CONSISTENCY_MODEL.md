@@ -1,6 +1,7 @@
 # SRE 일관성 및 내구성 모델
 
 - 각 일반 파일은 복사 전후의 `dev`, `ino`, `size`, `mtime`이 동일한지 검사합니다. 이는 파일 단위 안정성 검사이며 전체 트리의 한 시점 snapshot이 아닙니다.
+- 각 정규 파일의 `observed_at_ns`는 안정성 검사 직후 wall clock에서 기록합니다. 디렉터리 경로와 제외 항목(path/type/reason)도 snapshot manifest에 저장하며, directory metadata는 현재 포함하지 않습니다.
 - blob bytes는 temp file에 기록되고 file `fsync`, 같은 filesystem rename, shard directory `fsync`를 거친 뒤 DB가 참조합니다.
 - SQLite WAL/FULL transaction은 DB를 관리합니다. sidecar와 blob을 SQLite와 함께 묶는 원자 트랜잭션은 없습니다.
 - manifest sidecar는 DB에서 재생성한 canonical JSON과 비교합니다. checksum은 변조 탐지용이며 서명이나 작성자 인증이 아닙니다.

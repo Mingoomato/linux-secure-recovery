@@ -21,17 +21,34 @@
     },
     {
       "type": "object",
-      "required": ["type", "dry_run", "overwrite", "entry_count", "would_create", "would_replace", "preserved_conflicts", "blocked", "inspection_errors", "deletes", "writes_performed"],
+      "required": ["type", "path", "target_state", "action", "inspection_errno"],
+      "properties": {
+        "type": {"const": "restore_plan_directory"},
+        "path": {"type": "string", "minLength": 1},
+        "target_state": {"enum": ["unknown", "absent", "directory", "symlink", "other", "unreachable", "blocked_symlink", "blocked_non_directory", "unreadable"]},
+        "action": {"enum": ["create", "preserve", "blocked", "inspection_failed"]},
+        "inspection_errno": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type", "dry_run", "overwrite", "entry_count", "directory_count", "would_create", "would_replace", "preserved_conflicts", "blocked", "inspection_errors", "directories_to_create", "directories_preserved", "directories_blocked", "directory_inspection_errors", "deletes", "writes_performed"],
       "properties": {
         "type": {"const": "restore_plan_summary"},
         "dry_run": {"const": true},
         "overwrite": {"type": "boolean"},
         "entry_count": {"type": "integer", "minimum": 0},
+        "directory_count": {"type": "integer", "minimum": 0},
         "would_create": {"type": "integer", "minimum": 0},
         "would_replace": {"type": "integer", "minimum": 0},
         "preserved_conflicts": {"type": "integer", "minimum": 0},
         "blocked": {"type": "integer", "minimum": 0},
         "inspection_errors": {"type": "integer", "minimum": 0},
+        "directories_to_create": {"type": "integer", "minimum": 0},
+        "directories_preserved": {"type": "integer", "minimum": 0},
+        "directories_blocked": {"type": "integer", "minimum": 0},
+        "directory_inspection_errors": {"type": "integer", "minimum": 0},
         "deletes": {"const": 0},
         "writes_performed": {"const": false}
       },

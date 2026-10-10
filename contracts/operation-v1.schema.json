@@ -25,6 +25,7 @@
       "minimum": 0,
       "description": "Logical bytes represented or affected; prune does not report physical bytes reclaimed."
     },
+    "excluded_count": { "type": "integer", "minimum": 0 },
     "confirmed": { "type": "boolean" },
     "observed_at": { "type": "integer", "minimum": 0 }
   }

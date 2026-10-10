@@ -7,10 +7,14 @@
 | 추적 항목 | 상태 | 근거 |
 |---|---|---|
 | 구현 | PARTIAL | CLI와 주요 저장·검증·복원 흐름 구현. quota, 트리 전체 일관성, crash fault harness 등은 미구현 |
-| 기술 검증 | 실행한 로컬 게이트 통과 | GCC/Clang Release, Clang ASan/UBSan, 별도 Clang libFuzzer 구성, smoke와 analyzer |
+| 기술 검증 | 이전 revision 로컬 게이트 통과; 현재 변경 revision은 미검증 | directory/exclusion manifest 및 extension filter 추가 후 빌드·테스트·정적 분석을 실행하지 않음 |
 | 오너 학습/재현 | 미평가 | 독립 과제 수행이나 코드 설명 증거를 아직 받지 않음 |
 
-## 실행한 검증
+## 현재 revision의 구현 변경 후 상태
+
+2026-10-10에 directory path manifest, 지원하지 않는 항목의 명시적 제외 기록, 반복형 extension filter, 파일별 `observed_at_ns` 및 legacy DB migration, directory restore 계획, per-user systemd timer 예시를 추가했습니다. 사용자가 검증을 중단하고 구현을 계속하라고 지시했으므로 이 변경 뒤에는 빌드, CTest, schema validation, analyzer, `git diff --check`를 실행하지 않았습니다. 아래에 적은 통과 결과는 변경 전 revision의 역사적 증거이며 현재 파일의 검증 결과로 해석하면 안 됩니다.
+
+## 이전 revision에서 실행한 검증
 
 - GCC Release CMake 빌드: 통과.
 - GCC 16.2 Release 빌드/CTest: 2/2 통과 (`path-safety-unit`, `recovery-smoke`).

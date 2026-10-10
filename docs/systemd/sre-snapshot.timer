@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily local SRE snapshot
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+RandomizedDelaySec=15m
+Unit=sre-snapshot.service
+
+[Install]
+WantedBy=timers.target

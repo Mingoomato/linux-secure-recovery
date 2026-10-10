@@ -7,7 +7,8 @@ SRE는 명시적으로 만든 사전 snapshot을 우발적인 파일 손상/삭�
 ## 구현된 통제
 
 - source와 store의 동일/중첩 경로를 거부합니다.
-- symlink root와 symlink 파일을 따라가지 않으며 `openat2`의 beneath/no-symlink/no-magiclink 제약을 요구합니다.
+- symlink root와 symlink 파일을 따라가지 않으며 `openat2`의 beneath/no-symlink/no-magiclink 제약을 요구합니다. symlink·device·socket·FIFO와 다른 device의 항목은 내용을 열지 않고 manifest에 path/type/reason만 기록합니다.
+- 빈 디렉터리 경로와 사용자가 지정한 extension exclusions를 manifest에 기록합니다. 제외 목록은 선택적으로 백업되지 않은 경로의 이름을 노출하므로 manifest 접근도 store owner로 제한합니다.
 - 파일별 전후 stat 상태를 비교하고 content SHA-256을 확인합니다.
 - blob과 manifest를 temp → fsync → rename 순서로 설치합니다.
 - restore 쓰기에 `--confirm`, 기존 파일 교체에 별도 `--overwrite`를 요구합니다.

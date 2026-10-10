@@ -1,0 +1,10 @@
+[Unit]
+Description=Create a local SRE backup snapshot
+
+[Service]
+Type=oneshot
+# Adjust these per-user paths for the local checkout and data set.
+Environment=SRE_BIN=%h/linux-secure-recovery/build/sre
+Environment=SRE_SOURCE=%h/Documents
+Environment=SRE_STORE=%h/.local/share/sre-store
+ExecStart=/bin/sh -c 'exec "$SRE_BIN" snapshot --source "$SRE_SOURCE" --store "$SRE_STORE"'

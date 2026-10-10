@@ -45,5 +45,19 @@
 30. `load_entries`가 `sqlite3_column_text`의 NUL 종료 길이 대신 `sqlite3_column_bytes`를 확인하는 이유와 embedded NUL 경로의 위험은 무엇입니까?
 31. `cmd_init`에서 store 부모를 canonicalize한 후 mkdir 전에 overlap을 검사하는 이유는 무엇이며, mkdir 후 재검사는 어떤 경쟁을 다룹니까?
 32. path fuzzer가 10,000 runs를 통과했다는 결과가 실제 `openat2` 경로 안전성이나 전체 SRS fuzz 요구사항을 증명하지 않는 이유는 무엇입니까?
+33. `scan_tree`는 디렉터리 FD와 `fstatat` 정보를 어떤 순서로 사용하며, 열린 하위 디렉터리의 inode 비교가 해결하는 경쟁은 무엇입니까?
+34. `directory_entries`에 경로만 저장하는 현재 설계가 빈 디렉터리 복원에는 충분하지만 mode/owner/mtime 복원에는 부족한 이유는 무엇입니까?
+35. snapshot에서 symlink 경로와 유형만 기록하고 link target을 읽지 않는 선택이 traversal 위험과 감사 정보 사이에서 어떤 경계를 만듭니까?
+36. `different_device` 제외 정책이 bind mount, 일반 mount 경계, 동일 device의 다른 파일시스템 구성에서 어떤 한계를 가집니까?
+37. `--exclude-extension .tmp` 필터는 basename 기준으로 어떻게 적용되며 대소문자 정규화가 manifest 재현성에 어떤 영향을 줍니까?
+38. extension 제외 항목이 일반 파일 엔트리가 아니라 `excluded_entries`에 있어야 verify·restore·GC가 어떤 동작을 하게 됩니까?
+39. 빈 directory/exclusion arrays를 legacy `manifest.v1`에서 생략하는 호환성 선택의 이점과 canonical JSON 무결성 검증에 미치는 영향을 설명하세요.
+40. 디렉터리 dry-run 계획은 누락 부모, symlink 부모, 일반 파일 부모를 어떻게 구분하며, 어떤 이유로 검사 함수는 `mkdirat`를 호출하면 안 됩니까?
+41. 실제 복원에서 디렉터리를 먼저 만들고 파일을 다음에 설치하는 순서는 어떤 문제를 해결하며, 실패한 디렉터리가 후속 파일에 어떤 결과를 줄 수 있습니까?
+42. `excluded_count`, file `entry_count`, `directory_count`는 서로 어떤 항목 집합을 세며 snapshot audit의 affected count와 어떤 차이를 가집니까?
+43. 같은 relative path가 서로 다른 SQLite 테이블에 중복 삽입될 때 manifest와 restore plan에서 생길 수 있는 문제를 어떻게 예방할 수 있습니까?
+44. 확장자 제외가 대용량 파일 cap보다 앞에서 적용되는 것은 CPU/I/O 비용, 정책 설명, 메타데이터 노출 면에서 어떤 장단점이 있습니까?
+45. `observed_at_ns`는 어떤 clock에서 언제 캡처하며 wall clock 조정 때문에 어떤 해석을 피해야 합니까?
+46. legacy SQLite `entries`에 `observed_at_ns`가 없을 때 migration과 manifest 재생성은 기존 snapshot 검증을 어떻게 보존합니까?
 
 오너의 학습·재현 여부는 별도 추적합니다. 이 문서나 자동화된 테스트 통과만으로 개인 숙련도를 판정하지 않습니다.

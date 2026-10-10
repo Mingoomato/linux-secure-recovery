@@ -44,7 +44,32 @@
           "uid": {"type": "integer", "minimum": 0},
           "gid": {"type": "integer", "minimum": 0},
           "mtime_ns": {"type": "integer"},
+          "observed_at_ns": {"type": "integer", "minimum": 0, "description": "Per-file observation time in Unix epoch nanoseconds; absent only in legacy manifests."},
           "stable": {"const": true}
+        },
+        "additionalProperties": false
+      }
+    },
+    "directories": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["relative_path"],
+        "properties": {
+          "relative_path": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    },
+    "excluded_entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["relative_path", "type", "reason"],
+        "properties": {
+          "relative_path": {"type": "string", "minLength": 1},
+          "type": {"enum": ["symlink", "block_device", "character_device", "socket", "fifo", "file", "directory", "other"]},
+          "reason": {"enum": ["unsupported_type", "different_device", "extension_excluded"]}
         },
         "additionalProperties": false
       }

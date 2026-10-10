@@ -42,6 +42,15 @@ struct Entry {
     std::uint32_t uid = 0;
     std::uint32_t gid = 0;
     std::int64_t mtime_ns = 0;
+    std::int64_t observed_at_ns = 0;
+};
+struct DirectoryEntry {
+    std::string path;
+};
+struct ExcludedEntry {
+    std::string path;
+    std::string type;
+    std::string reason;
 };
 
 std::string get_arg(int argc, char **argv, const std::string &name,
@@ -52,6 +61,48 @@ std::string get_arg(int argc, char **argv, const std::string &name,
 
 bool has_flag(int argc, char **argv, const std::string &name) {
     return std::find(argv + 2, argv + argc, name) != argv + argc;
+}
+
+std::vector<std::string> get_multi_args(int argc, char **argv, const std::string &name) {
+    std::vector<std::string> values;
+    for (int i = 2; i < argc; ++i) {
+        if (name != argv[i]) continue;
+        if (i + 1 >= argc || std::string(argv[i + 1]).starts_with("--"))
+            throw std::runtime_error(name + " requires a value");
+        values.emplace_back(argv[++i]);
+    }
+    return values;
+}
+
+std::vector<std::string> validated_extensions(std::vector<std::string> extensions) {
+    for (std::string &extension : extensions) {
+        if (extension.size() < 2U || extension.size() > 64U || extension.front() != '.' ||
+            extension.find("..") != std::string::npos || extension.back() == '.')
+            throw std::runtime_error("extension filters must look like .tmp or .tar.gz");
+        for (unsigned char c : extension) {
+            if (c == '.') continue;
+            if (std::isalnum(c) == 0 && c != '_' && c != '-' && c != '+')
+                throw std::runtime_error("extension filter contains an unsupported character");
+        }
+        std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+    }
+    return extensions;
+}
+
+bool matches_excluded_extension(const std::string &relative_path,
+                                const std::vector<std::string> &extensions) {
+    const std::size_t slash = relative_path.find_last_of('/');
+    const std::string basename = relative_path.substr(slash == std::string::npos ? 0U : slash + 1U);
+    std::string folded = basename;
+    std::transform(folded.begin(), folded.end(), folded.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return std::any_of(extensions.begin(), extensions.end(), [&folded](const std::string &extension) {
+        return folded.size() >= extension.size() &&
+            folded.compare(folded.size() - extension.size(), extension.size(), extension) == 0;
+    });
 }
 
 bool valid_utf8(const std::string &value) {
@@ -175,6 +226,17 @@ std::int64_t mtime_ns(const struct stat &st) {
     return static_cast<std::int64_t>(st.st_mtim.tv_sec) * 1000000000LL + st.st_mtim.tv_nsec;
 }
 
+std::string snapshot_entry_type(const struct stat &st) {
+    if (S_ISLNK(st.st_mode)) return "symlink";
+    if (S_ISBLK(st.st_mode)) return "block_device";
+    if (S_ISCHR(st.st_mode)) return "character_device";
+    if (S_ISSOCK(st.st_mode)) return "socket";
+    if (S_ISFIFO(st.st_mode)) return "fifo";
+    if (S_ISDIR(st.st_mode)) return "directory";
+    if (S_ISREG(st.st_mode)) return "file";
+    return "other";
+}
+
 std::string now_id() {
     auto now = std::chrono::system_clock::now();
     auto sec = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
@@ -220,7 +282,15 @@ sqlite3 *open_db(const std::string &store, bool create) {
         "CREATE TABLE IF NOT EXISTS entries(snapshot_id TEXT NOT NULL, relative_path TEXT NOT NULL,"
         " type TEXT NOT NULL CHECK(type='file'), size INTEGER NOT NULL, sha256 TEXT NOT NULL,"
         " mode INTEGER NOT NULL, uid INTEGER NOT NULL, gid INTEGER NOT NULL, mtime_ns INTEGER NOT NULL,"
-        " stable INTEGER NOT NULL, PRIMARY KEY(snapshot_id,relative_path),"
+        " stable INTEGER NOT NULL, observed_at_ns INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(snapshot_id,relative_path),"
+        " FOREIGN KEY(snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE);"
+        "CREATE TABLE IF NOT EXISTS directory_entries(snapshot_id TEXT NOT NULL,relative_path TEXT NOT NULL,"
+        " PRIMARY KEY(snapshot_id,relative_path),"
+        " FOREIGN KEY(snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE);"
+        "CREATE TABLE IF NOT EXISTS excluded_entries(snapshot_id TEXT NOT NULL,relative_path TEXT NOT NULL,"
+        " type TEXT NOT NULL CHECK(type IN ('symlink','block_device','character_device','socket','fifo','file','directory','other')) ,"
+        " reason TEXT NOT NULL CHECK(reason IN ('unsupported_type','different_device','extension_excluded')) ,"
+        " PRIMARY KEY(snapshot_id,relative_path),"
         " FOREIGN KEY(snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE);";
     char *error = nullptr;
     rc = sqlite3_exec(db, schema, nullptr, nullptr, &error);
@@ -228,6 +298,26 @@ sqlite3 *open_db(const std::string &store, bool create) {
         std::string message = error ? error : sqlite3_errmsg(db);
         sqlite3_free(error); sqlite3_close(db);
         throw std::runtime_error("schema setup: " + message);
+    }
+    try {
+        bool has_observed_at = false;
+        sqlite3_stmt *columns = nullptr;
+        sql_check(sqlite3_prepare_v2(db, "PRAGMA table_info(entries)", -1, &columns, nullptr), db,
+                  "prepare entry schema migration");
+        int column_rc = SQLITE_OK;
+        while ((column_rc = sqlite3_step(columns)) == SQLITE_ROW) {
+            const auto *column_name = sqlite3_column_text(columns, 1);
+            if (column_name && std::string(reinterpret_cast<const char *>(column_name)) == "observed_at_ns")
+                has_observed_at = true;
+        }
+        sqlite3_finalize(columns);
+        sql_check(column_rc, db, "read entry schema migration");
+        if (!has_observed_at)
+            exec_sql(db, "ALTER TABLE entries ADD COLUMN observed_at_ns INTEGER NOT NULL DEFAULT 0",
+                     "add per-file observation time");
+    } catch (...) {
+        sqlite3_close(db);
+        throw;
     }
     return db;
 }
@@ -352,6 +442,8 @@ void save_blob(int rootfd, const std::string &store, const std::string &snapshot
         entry.uid = static_cast<std::uint32_t>(before.st_uid);
         entry.gid = static_cast<std::uint32_t>(before.st_gid);
         entry.mtime_ns = mtime_ns(before);
+        entry.observed_at_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
     } catch (...) {
         EVP_MD_CTX_free(ctx); close(src); close(dst); unlink(temp.c_str()); throw;
     }
@@ -391,8 +483,11 @@ void save_blob(int rootfd, const std::string &store, const std::string &snapshot
 }
 
 void scan_tree(int rootfd, int currentfd, const std::string &prefix,
-               dev_t rootdev, std::vector<Entry> &entries, sqlite3 *db,
-               const std::string &snapshot, const std::string &store, unsigned &counter,
+               dev_t rootdev, std::vector<Entry> &entries,
+               std::vector<DirectoryEntry> &directories,
+               std::vector<ExcludedEntry> &excluded_entries, sqlite3 *db,
+               const std::string &snapshot, const std::string &store,
+               const std::vector<std::string> &excluded_extensions, unsigned &counter,
                unsigned depth = 0) {
     if (depth > 128U) throw std::runtime_error("directory depth limit exceeded");
     int dupfd = dup(currentfd);
@@ -412,24 +507,79 @@ void scan_tree(int rootfd, int currentfd, const std::string &prefix,
             struct stat st {};
             if (fstatat(currentfd, de->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0)
                 throw std::runtime_error("fstatat failed for " + rel);
-            if (st.st_dev != rootdev || S_ISLNK(st.st_mode)) continue;
+            const std::string type = snapshot_entry_type(st);
+            if (st.st_dev != rootdev || type == "symlink" || type == "block_device" ||
+                type == "character_device" || type == "socket" || type == "fifo" || type == "other") {
+                ExcludedEntry excluded {rel, type,
+                    st.st_dev != rootdev ? "different_device" : "unsupported_type"};
+                sqlite3_stmt *excluded_stmt = nullptr;
+                sql_check(sqlite3_prepare_v2(db,
+                    "INSERT INTO excluded_entries(snapshot_id,relative_path,type,reason) VALUES(?1,?2,?3,?4)",
+                    -1, &excluded_stmt, nullptr), db, "prepare excluded entry");
+                sqlite3_bind_text(excluded_stmt, 1, snapshot.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(excluded_stmt, 2, excluded.path.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(excluded_stmt, 3, excluded.type.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(excluded_stmt, 4, excluded.reason.c_str(), -1, SQLITE_TRANSIENT);
+                const int excluded_rc = sqlite3_step(excluded_stmt);
+                const int excluded_finalize_rc = sqlite3_finalize(excluded_stmt);
+                sql_check(excluded_rc, db, "insert excluded entry");
+                sql_check(excluded_finalize_rc, db, "finalize excluded entry insert");
+                excluded_entries.push_back(std::move(excluded));
+                continue;
+            }
             if (S_ISDIR(st.st_mode)) {
+                DirectoryEntry directory {rel};
+                sqlite3_stmt *directory_stmt = nullptr;
+                sql_check(sqlite3_prepare_v2(db,
+                    "INSERT INTO directory_entries(snapshot_id,relative_path) VALUES(?1,?2)",
+                    -1, &directory_stmt, nullptr), db, "prepare directory entry");
+                sqlite3_bind_text(directory_stmt, 1, snapshot.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(directory_stmt, 2, directory.path.c_str(), -1, SQLITE_TRANSIENT);
+                const int directory_rc = sqlite3_step(directory_stmt);
+                const int directory_finalize_rc = sqlite3_finalize(directory_stmt);
+                sql_check(directory_rc, db, "insert directory entry");
+                sql_check(directory_finalize_rc, db, "finalize directory entry insert");
+                directories.push_back(directory);
                 UniqueFd child(open_beneath(rootfd, rel, O_RDONLY | O_DIRECTORY | O_NOFOLLOW));
                 if (child.get() < 0) throw std::runtime_error("openat2 rejected directory " + rel);
-                scan_tree(rootfd, child.get(), rel, rootdev, entries, db, snapshot, store, counter, depth + 1U);
+                struct stat opened_directory {};
+                if (fstat(child.get(), &opened_directory) != 0 ||
+                    opened_directory.st_dev != st.st_dev || opened_directory.st_ino != st.st_ino)
+                    throw std::runtime_error("SNAPSHOT_UNSTABLE: directory changed during traversal: " + rel);
+                scan_tree(rootfd, child.get(), rel, rootdev, entries, directories,
+                          excluded_entries, db, snapshot, store, excluded_extensions,
+                          counter, depth + 1U);
             } else if (S_ISREG(st.st_mode)) {
+                if (matches_excluded_extension(rel, excluded_extensions)) {
+                    ExcludedEntry excluded {rel, "file", "extension_excluded"};
+                    sqlite3_stmt *excluded_stmt = nullptr;
+                    sql_check(sqlite3_prepare_v2(db,
+                        "INSERT INTO excluded_entries(snapshot_id,relative_path,type,reason) VALUES(?1,?2,?3,?4)",
+                        -1, &excluded_stmt, nullptr), db, "prepare extension exclusion");
+                    sqlite3_bind_text(excluded_stmt, 1, snapshot.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(excluded_stmt, 2, excluded.path.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(excluded_stmt, 3, excluded.type.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(excluded_stmt, 4, excluded.reason.c_str(), -1, SQLITE_TRANSIENT);
+                    const int excluded_rc = sqlite3_step(excluded_stmt);
+                    const int excluded_finalize_rc = sqlite3_finalize(excluded_stmt);
+                    sql_check(excluded_rc, db, "record extension exclusion");
+                    sql_check(excluded_finalize_rc, db, "finalize extension exclusion");
+                    excluded_entries.push_back(std::move(excluded));
+                    continue;
+                }
                 Entry e; e.path = rel;
                 save_blob(rootfd, store, snapshot, rel, e, counter++);
                 sqlite3_stmt *stmt = nullptr;
                 sql_check(sqlite3_prepare_v2(db,
-                    "INSERT INTO entries(snapshot_id,relative_path,type,size,sha256,mode,uid,gid,mtime_ns,stable)"
-                    " VALUES(?1,?2,'file',?3,?4,?5,?6,?7,?8,1)", -1, &stmt, nullptr), db, "prepare entry");
+                    "INSERT INTO entries(snapshot_id,relative_path,type,size,sha256,mode,uid,gid,mtime_ns,stable,observed_at_ns)"
+                    " VALUES(?1,?2,'file',?3,?4,?5,?6,?7,?8,1,?9)", -1, &stmt, nullptr), db, "prepare entry");
                 sqlite3_bind_text(stmt, 1, snapshot.c_str(), -1, SQLITE_TRANSIENT);
                 sqlite3_bind_text(stmt, 2, e.path.c_str(), -1, SQLITE_TRANSIENT);
                 sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(e.size));
                 sqlite3_bind_text(stmt, 4, e.hash.c_str(), -1, SQLITE_TRANSIENT);
                 sqlite3_bind_int64(stmt, 5, e.mode); sqlite3_bind_int64(stmt, 6, e.uid);
                 sqlite3_bind_int64(stmt, 7, e.gid); sqlite3_bind_int64(stmt, 8, e.mtime_ns);
+                sqlite3_bind_int64(stmt, 9, e.observed_at_ns);
                 const int step_rc = sqlite3_step(stmt);
                 const int finalize_rc = sqlite3_finalize(stmt);
                 sql_check(step_rc, db, "insert entry");
@@ -450,7 +600,7 @@ std::string blob_path(const std::string &store, const std::string &hash) {
 std::vector<Entry> load_entries(sqlite3 *db, const std::string &id) {
     sqlite3_stmt *stmt = nullptr;
     sql_check(sqlite3_prepare_v2(db,
-        "SELECT relative_path,sha256,size,mode,uid,gid,mtime_ns FROM entries WHERE snapshot_id=?1 ORDER BY relative_path",
+        "SELECT relative_path,sha256,size,mode,uid,gid,mtime_ns,observed_at_ns FROM entries WHERE snapshot_id=?1 ORDER BY relative_path",
         -1, &stmt, nullptr), db, "prepare manifest query");
     sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
     std::vector<Entry> result;
@@ -471,6 +621,7 @@ std::vector<Entry> load_entries(sqlite3 *db, const std::string &id) {
         e.uid = static_cast<std::uint32_t>(sqlite3_column_int(stmt, 4));
         e.gid = static_cast<std::uint32_t>(sqlite3_column_int(stmt, 5));
         e.mtime_ns = sqlite3_column_int64(stmt, 6);
+        e.observed_at_ns = sqlite3_column_int64(stmt, 7);
         if (!sre::path::safe_relative_path(e.path)) {
             sqlite3_finalize(stmt);
             throw std::runtime_error("unsafe relative path in manifest");
@@ -478,6 +629,77 @@ std::vector<Entry> load_entries(sqlite3 *db, const std::string &id) {
         result.push_back(std::move(e));
     }
     sqlite3_finalize(stmt);
+    return result;
+}
+
+std::vector<DirectoryEntry> load_directories(sqlite3 *db, const std::string &id) {
+    sqlite3_stmt *stmt = nullptr;
+    sql_check(sqlite3_prepare_v2(db,
+        "SELECT relative_path FROM directory_entries WHERE snapshot_id=?1 ORDER BY relative_path",
+        -1, &stmt, nullptr), db, "prepare directory query");
+    sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+    std::vector<DirectoryEntry> result;
+    int rc = SQLITE_OK;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const auto *path_text = sqlite3_column_text(stmt, 0);
+        const int path_bytes = sqlite3_column_bytes(stmt, 0);
+        if (!path_text || path_bytes <= 0) {
+            sqlite3_finalize(stmt);
+            throw std::runtime_error("invalid directory path in snapshot database");
+        }
+        DirectoryEntry directory;
+        directory.path.assign(reinterpret_cast<const char *>(path_text), static_cast<std::size_t>(path_bytes));
+        if (!sre::path::safe_relative_path(directory.path)) {
+            sqlite3_finalize(stmt);
+            throw std::runtime_error("unsafe directory path in snapshot database");
+        }
+        result.push_back(std::move(directory));
+    }
+    sqlite3_finalize(stmt);
+    sql_check(rc, db, "read directory query");
+    return result;
+}
+
+std::vector<ExcludedEntry> load_excluded_entries(sqlite3 *db, const std::string &id) {
+    sqlite3_stmt *stmt = nullptr;
+    sql_check(sqlite3_prepare_v2(db,
+        "SELECT relative_path,type,reason FROM excluded_entries WHERE snapshot_id=?1 ORDER BY relative_path",
+        -1, &stmt, nullptr), db, "prepare excluded entry query");
+    sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+    std::vector<ExcludedEntry> result;
+    int rc = SQLITE_OK;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const auto *path_text = sqlite3_column_text(stmt, 0);
+        const int path_bytes = sqlite3_column_bytes(stmt, 0);
+        const auto *type_text = sqlite3_column_text(stmt, 1);
+        const int type_bytes = sqlite3_column_bytes(stmt, 1);
+        const auto *reason_text = sqlite3_column_text(stmt, 2);
+        const int reason_bytes = sqlite3_column_bytes(stmt, 2);
+        if (!path_text || path_bytes <= 0 || !type_text || type_bytes <= 0 || !reason_text || reason_bytes <= 0) {
+            sqlite3_finalize(stmt);
+            throw std::runtime_error("invalid excluded entry in snapshot database");
+        }
+        ExcludedEntry entry;
+        entry.path.assign(reinterpret_cast<const char *>(path_text), static_cast<std::size_t>(path_bytes));
+        entry.type.assign(reinterpret_cast<const char *>(type_text), static_cast<std::size_t>(type_bytes));
+        entry.reason.assign(reinterpret_cast<const char *>(reason_text), static_cast<std::size_t>(reason_bytes));
+        const bool known_type = entry.type == "symlink" || entry.type == "block_device" ||
+            entry.type == "character_device" || entry.type == "socket" || entry.type == "fifo" ||
+            entry.type == "file" || entry.type == "directory" || entry.type == "other";
+        const bool known_reason = entry.reason == "unsupported_type" || entry.reason == "different_device" ||
+            entry.reason == "extension_excluded";
+        if (!sre::path::safe_relative_path(entry.path)) {
+            sqlite3_finalize(stmt);
+            throw std::runtime_error("unsafe excluded path in snapshot database");
+        }
+        if (!known_type || !known_reason) {
+            sqlite3_finalize(stmt);
+            throw std::runtime_error("unknown excluded entry classification in snapshot database");
+        }
+        result.push_back(std::move(entry));
+    }
+    sqlite3_finalize(stmt);
+    sql_check(rc, db, "read excluded entry query");
     return result;
 }
 
@@ -494,8 +716,16 @@ std::string sha256_text(const std::string &text) {
 }
 
 std::string manifest_document(const std::string &id, const std::string &source,
-                              std::int64_t created_at, std::vector<Entry> entries) {
+                              std::int64_t created_at, std::vector<Entry> entries,
+                              std::vector<DirectoryEntry> directories,
+                              std::vector<ExcludedEntry> excluded_entries) {
     std::sort(entries.begin(), entries.end(), [](const Entry &a, const Entry &b) { return a.path < b.path; });
+    std::sort(directories.begin(), directories.end(), [](const DirectoryEntry &a, const DirectoryEntry &b) {
+        return a.path < b.path;
+    });
+    std::sort(excluded_entries.begin(), excluded_entries.end(), [](const ExcludedEntry &a, const ExcludedEntry &b) {
+        return a.path < b.path;
+    });
     std::ostringstream payload;
     payload << "{\"schema_version\":\"manifest.v1\",\"snapshot_id\":" << json_quote(id)
             << ",\"source_root_identity\":{\"path\":" << json_quote(source) << "}"
@@ -509,9 +739,31 @@ std::string manifest_document(const std::string &id, const std::string &source,
                 << ",\"sha256\":" << json_quote(entry.hash)
                 << ",\"mode\":" << entry.mode << ",\"uid\":" << entry.uid
                 << ",\"gid\":" << entry.gid << ",\"mtime_ns\":" << entry.mtime_ns
-                << ",\"stable\":true}";
+                << ",\"stable\":true";
+        if (entry.observed_at_ns > 0) payload << ",\"observed_at_ns\":" << entry.observed_at_ns;
+        payload << '}';
     }
-    payload << "]}";
+    payload << ']';
+    if (!directories.empty()) {
+        payload << ",\"directories\":[";
+        for (std::size_t i = 0; i < directories.size(); ++i) {
+            if (i != 0U) payload << ',';
+            payload << "{\"relative_path\":" << json_quote(directories[i].path) << '}';
+        }
+        payload << ']';
+    }
+    if (!excluded_entries.empty()) {
+        payload << ",\"excluded_entries\":[";
+        for (std::size_t i = 0; i < excluded_entries.size(); ++i) {
+            const ExcludedEntry &entry = excluded_entries[i];
+            if (i != 0U) payload << ',';
+            payload << "{\"relative_path\":" << json_quote(entry.path)
+                    << ",\"type\":" << json_quote(entry.type)
+                    << ",\"reason\":" << json_quote(entry.reason) << '}';
+        }
+        payload << ']';
+    }
+    payload << '}';
     const std::string canonical = payload.str();
     std::string document = canonical.substr(0, canonical.size() - 1U);
     document += ",\"manifest_integrity_hash\":" + json_quote(sha256_text(canonical)) + "}\n";
@@ -586,10 +838,13 @@ std::int64_t snapshot_created_at(sqlite3 *db, const std::string &id) {
 }
 
 bool manifest_matches_db(const std::string &store, sqlite3 *db, const std::string &id,
-                         const std::string &source, const std::vector<Entry> &entries) {
+                         const std::string &source, const std::vector<Entry> &entries,
+                         const std::vector<DirectoryEntry> &directories,
+                         const std::vector<ExcludedEntry> &excluded_entries) {
     if (!sre::path::safe_snapshot_id(id)) throw std::runtime_error("unsafe snapshot identifier");
     const auto created_at = snapshot_created_at(db, id);
-    const std::string expected = manifest_document(id, source, created_at, entries);
+    const std::string expected = manifest_document(id, source, created_at, entries,
+                                                   directories, excluded_entries);
     const std::string actual = read_file_bounded(store + "/manifests/" + id + ".json", 64U * 1024U * 1024U);
     return actual == expected;
 }
@@ -608,7 +863,8 @@ std::string snapshot_source(sqlite3 *db, const std::string &id) {
 }
 
 void audit(const std::string &store, const std::string &operation, const std::string &id,
-           std::size_t count, std::uint64_t bytes, bool confirmed) {
+           std::size_t count, std::uint64_t bytes, bool confirmed,
+           std::size_t excluded_count = 0U) {
     UniqueFd fd(open((store + "/audit/events.ndjson").c_str(),
                      O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600));
     if (fd.get() < 0) throw std::runtime_error("cannot open audit log: " + std::string(strerror(errno)));
@@ -623,7 +879,9 @@ void audit(const std::string &store, const std::string &operation, const std::st
          << ",\"snapshot_id\":" << json_quote(id) << ",\"affected_count\":" << count
          << ",\"byte_count\":" << bytes
          << ",\"confirmed\":" << (confirmed ? "true" : "false")
-         << ",\"observed_at\":" << now << "}\n";
+         << ",\"observed_at\":" << now;
+    if (operation == "snapshot") line << ",\"excluded_count\":" << excluded_count;
+    line << "}\n";
     const std::string record = line.str();
     write_all(fd.get(), reinterpret_cast<const unsigned char *>(record.data()), record.size());
     if (fsync(fd.get()) != 0) throw std::runtime_error("audit log fsync failed");
@@ -680,6 +938,7 @@ int cmd_init(int argc, char **argv) {
 }
 
 int cmd_snapshot(int argc, char **argv) {
+    const auto excluded_extensions = validated_extensions(get_multi_args(argc, argv, "--exclude-extension"));
     std::string source = canonical_dir(get_arg(argc, argv, "--source"));
     std::string store = canonical_dir(get_arg(argc, argv, "--store"));
     if (beneath(source, store) || beneath(store, source))
@@ -712,8 +971,12 @@ int cmd_snapshot(int argc, char **argv) {
 
         exec_sql(db, "BEGIN IMMEDIATE", "begin snapshot entries transaction");
         entry_transaction_open = true;
-        std::vector<Entry> entries; unsigned counter = 0;
-        scan_tree(rootfd, rootfd, "", rootst.st_dev, entries, db, id, store, counter);
+        std::vector<Entry> entries;
+        std::vector<DirectoryEntry> directories;
+        std::vector<ExcludedEntry> excluded_entries;
+        unsigned counter = 0;
+        scan_tree(rootfd, rootfd, "", rootst.st_dev, entries, directories,
+                  excluded_entries, db, id, store, excluded_extensions, counter);
         sql_check(sqlite3_prepare_v2(db,
             "UPDATE snapshots SET state='VERIFIED',incomplete_count=0 WHERE id=?1 AND state='COPYING'",
             -1, &stmt, nullptr), db, "prepare VERIFIED update");
@@ -725,7 +988,8 @@ int cmd_snapshot(int argc, char **argv) {
         exec_sql(db, "COMMIT", "commit verified entries");
         entry_transaction_open = false;
 
-        const std::string manifest = manifest_document(id, source, created_at, entries);
+        const std::string manifest = manifest_document(id, source, created_at, entries,
+                                                       directories, excluded_entries);
         write_manifest_atomic(store, id, manifest);
         manifest_written = true;
         exec_sql(db, "BEGIN IMMEDIATE", "begin COMMITTED state transaction");
@@ -742,9 +1006,11 @@ int cmd_snapshot(int argc, char **argv) {
         entry_transaction_open = false;
         committed = true;
 
-        audit(store, "snapshot", id, entries.size(), total_bytes(entries), true);
+        audit(store, "snapshot", id, entries.size(), total_bytes(entries), true, excluded_entries.size());
         close(rootfd); sqlite3_close(db);
-        std::cout << id << " files=" << entries.size() << '\n';
+        std::cout << id << " files=" << entries.size()
+                  << " directories=" << directories.size()
+                  << " excluded=" << excluded_entries.size() << '\n';
         return 0;
     } catch (...) {
         if (stmt) sqlite3_finalize(stmt);
@@ -785,7 +1051,9 @@ int cmd_show(const std::string &store, const std::string &id) {
     sqlite3 *db = open_db(store, false);
     sqlite3_stmt *stmt = nullptr;
     sql_check(sqlite3_prepare_v2(db,
-        "SELECT s.source_root,s.created_at,s.state,s.incomplete_count,COUNT(e.relative_path),COALESCE(SUM(e.size),0) "
+        "SELECT s.source_root,s.created_at,s.state,s.incomplete_count,COUNT(e.relative_path),COALESCE(SUM(e.size),0),"
+        "(SELECT COUNT(*) FROM directory_entries d WHERE d.snapshot_id=s.id),"
+        "(SELECT COUNT(*) FROM excluded_entries x WHERE x.snapshot_id=s.id) "
         "FROM snapshots s LEFT JOIN entries e ON e.snapshot_id=s.id "
         "WHERE s.id=?1 AND s.id!='__store__' GROUP BY s.id,s.source_root,s.created_at,s.state,s.incomplete_count",
         -1, &stmt, nullptr), db, "prepare snapshot details query");
@@ -811,7 +1079,9 @@ int cmd_show(const std::string &store, const std::string &id) {
               << ",\"state\":" << json_quote(reinterpret_cast<const char *>(state))
               << ",\"incomplete_count\":" << sqlite3_column_int64(stmt, 3)
               << ",\"entry_count\":" << sqlite3_column_int64(stmt, 4)
-              << ",\"byte_count\":" << sqlite3_column_int64(stmt, 5) << "}\n";
+              << ",\"byte_count\":" << sqlite3_column_int64(stmt, 5)
+              << ",\"directory_count\":" << sqlite3_column_int64(stmt, 6)
+              << ",\"excluded_count\":" << sqlite3_column_int64(stmt, 7) << "}\n";
     sqlite3_finalize(stmt);
     sqlite3_close(db);
     return 0;
@@ -822,6 +1092,8 @@ int cmd_verify(const std::string &store, const std::string &id) {
     sqlite3 *db = open_db(store, false);
     const std::string source = snapshot_source(db, id);
     auto entries = load_entries(db, id);
+    auto directories = load_directories(db, id);
+    auto excluded_entries = load_excluded_entries(db, id);
     if (entries.empty()) {
         sqlite3_stmt *s = nullptr; sqlite3_prepare_v2(db, "SELECT 1 FROM entries WHERE snapshot_id=?1 LIMIT 1", -1, &s, nullptr);
         sqlite3_bind_text(s, 1, id.c_str(), -1, SQLITE_TRANSIENT);
@@ -830,7 +1102,7 @@ int cmd_verify(const std::string &store, const std::string &id) {
     }
     std::size_t bad = 0;
     try {
-        if (!manifest_matches_db(store, db, id, source, entries)) {
+        if (!manifest_matches_db(store, db, id, source, entries, directories, excluded_entries)) {
             std::cout << "corrupt manifest " << id << '\n';
             ++bad;
         }
@@ -980,6 +1252,105 @@ RestorePlanItem inspect_restore_target(int rootfd, const Entry &entry, bool over
     return result;
 }
 
+struct DirectoryPlanItem {
+    std::string target_state = "unknown";
+    std::string action = "inspection_failed";
+    int inspection_errno = 0;
+};
+
+DirectoryPlanItem inspect_directory_target(int rootfd, const DirectoryEntry &entry) {
+    DirectoryPlanItem result;
+    if (!sre::path::safe_relative_path(entry.path)) {
+        result.inspection_errno = EINVAL;
+        return result;
+    }
+    std::vector<std::string> components;
+    std::size_t start = 0;
+    while (start < entry.path.size()) {
+        const std::size_t slash = entry.path.find('/', start);
+        components.push_back(entry.path.substr(start,
+            slash == std::string::npos ? slash : slash - start));
+        if (slash == std::string::npos) break;
+        start = slash + 1U;
+    }
+    if (components.empty()) { result.inspection_errno = EINVAL; return result; }
+    int dirfd = dup(rootfd);
+    if (dirfd < 0) { result.inspection_errno = errno; return result; }
+    for (std::size_t i = 0; i + 1U < components.size(); ++i) {
+        int next = openat(dirfd, components[i].c_str(),
+                          O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (next < 0) {
+            const int open_error = errno;
+            struct stat parent_stat {};
+            if (fstatat(dirfd, components[i].c_str(), &parent_stat, AT_SYMLINK_NOFOLLOW) == 0) {
+                if (S_ISLNK(parent_stat.st_mode)) result.target_state = "blocked_symlink";
+                else if (!S_ISDIR(parent_stat.st_mode)) result.target_state = "blocked_non_directory";
+                else { result.target_state = "unreadable"; result.inspection_errno = open_error; }
+                if (result.target_state.starts_with("blocked_")) result.action = "blocked";
+            } else if (errno == ENOENT) {
+                result.target_state = "unreachable";
+                result.action = "create";
+            } else result.inspection_errno = errno;
+            close(dirfd);
+            return result;
+        }
+        close(dirfd);
+        dirfd = next;
+    }
+    const std::string &name = components.back();
+    struct stat target_stat {};
+    if (fstatat(dirfd, name.c_str(), &target_stat, AT_SYMLINK_NOFOLLOW) != 0) {
+        if (errno == ENOENT) {
+            result.target_state = "absent";
+            result.action = "create";
+        } else result.inspection_errno = errno;
+        close(dirfd);
+        return result;
+    }
+    close(dirfd);
+    if (S_ISDIR(target_stat.st_mode)) {
+        result.target_state = "directory";
+        result.action = "preserve";
+    } else {
+        result.target_state = S_ISLNK(target_stat.st_mode) ? "symlink" : "other";
+        result.action = "blocked";
+    }
+    return result;
+}
+
+int restore_directory(int targetfd, const DirectoryEntry &entry) {
+    if (!sre::path::safe_relative_path(entry.path)) { errno = EINVAL; return -1; }
+    const std::size_t slash = entry.path.find_last_of('/');
+    const std::string parent = slash == std::string::npos ? "" : entry.path.substr(0, slash);
+    const std::string name = slash == std::string::npos ? entry.path : entry.path.substr(slash + 1U);
+    int dirfd = parent.empty() ? dup(targetfd) : ensure_parent(targetfd, parent + "/");
+    if (dirfd < 0) return -1;
+    const int mkdir_rc = mkdirat(dirfd, name.c_str(), 0700);
+    const bool created = mkdir_rc == 0;
+    if (!created && errno != EEXIST) {
+        close(dirfd);
+        return -1;
+    }
+    int child = openat(dirfd, name.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (child < 0) { close(dirfd); return -1; }
+    struct stat st {};
+    const bool safe_directory = fstat(child, &st) == 0 && S_ISDIR(st.st_mode);
+    int child_sync_rc = 0;
+    if (safe_directory && created) {
+        child_sync_rc = fchmod(child, 0700);
+        if (child_sync_rc == 0) child_sync_rc = fsync(child);
+    }
+    const int parent_sync_rc = safe_directory && created && child_sync_rc == 0 ? fsync(dirfd) : 0;
+    const int saved = errno;
+    close(child);
+    close(dirfd);
+    if (!safe_directory || child_sync_rc != 0 || parent_sync_rc != 0) {
+        errno = saved ? saved : EIO;
+        return -1;
+    }
+    return created ? 0 : 1;
+}
+
 int restore_one(int targetfd, const std::string &store, const Entry &e, bool overwrite) {
     std::size_t slash = e.path.find_last_of('/');
     std::string parent = slash == std::string::npos ? "" : e.path.substr(0, slash);
@@ -1046,10 +1417,24 @@ int restore_one(int targetfd, const std::string &store, const Entry &e, bool ove
     unsigned int flags = overwrite ? 0U : RENAME_NOREPLACE;
     int rc = static_cast<int>(syscall(SYS_renameat2, dirfd, temp.c_str(), dirfd, name.c_str(), flags));
     if (rc != 0) { close(staged_fd); unlinkat(dirfd, temp.c_str(), 0); close(dirfd); return -1; }
-    struct stat installed_stat {};
-    if (fstatat(dirfd, name.c_str(), &installed_stat, AT_SYMLINK_NOFOLLOW) != 0 ||
-        !S_ISREG(installed_stat.st_mode) || installed_stat.st_dev != staged_stat.st_dev ||
-        installed_stat.st_ino != staged_stat.st_ino || fsync(dirfd) != 0) {
+    UniqueFd installed(openat(dirfd, name.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+    struct stat installed_before {}, installed_after {}, installed_path_after {};
+    bool installed_valid = installed.get() >= 0 && fstat(installed.get(), &installed_before) == 0 &&
+        S_ISREG(installed_before.st_mode) && installed_before.st_dev == staged_stat.st_dev &&
+        installed_before.st_ino == staged_stat.st_ino && installed_before.st_size >= 0 &&
+        static_cast<std::uint64_t>(installed_before.st_size) == e.size;
+    if (installed_valid) {
+        try {
+            installed_valid = sha256_fd(installed.get()) == e.hash &&
+                fstat(installed.get(), &installed_after) == 0 && same_state(installed_before, installed_after) &&
+                fstatat(dirfd, name.c_str(), &installed_path_after, AT_SYMLINK_NOFOLLOW) == 0 &&
+                S_ISREG(installed_path_after.st_mode) && installed_path_after.st_dev == installed_before.st_dev &&
+                installed_path_after.st_ino == installed_before.st_ino;
+        } catch (...) {
+            installed_valid = false;
+        }
+    }
+    if (!installed_valid || fsync(dirfd) != 0) {
         close(staged_fd); close(dirfd); errno = EIO; return -1;
     }
     close(staged_fd);
@@ -1064,9 +1449,11 @@ int cmd_restore(const std::string &store, const std::string &id, const std::stri
     sqlite3 *db = open_db(store, false);
     const std::string source = snapshot_source(db, id);
     auto entries = load_entries(db, id);
+    auto directories = load_directories(db, id);
+    auto excluded_entries = load_excluded_entries(db, id);
     bool manifest_valid = false;
     try {
-        manifest_valid = manifest_matches_db(store, db, id, source, entries);
+        manifest_valid = manifest_matches_db(store, db, id, source, entries, directories, excluded_entries);
     } catch (...) {
         sqlite3_close(db);
         throw;
@@ -1082,6 +1469,8 @@ int cmd_restore(const std::string &store, const std::string &id, const std::stri
     if (dry) {
         std::size_t would_create = 0, would_replace = 0, preserved = 0;
         std::size_t blocked = 0, inspection_errors = 0;
+        std::size_t directories_to_create = 0, directories_preserved = 0;
+        std::size_t directories_blocked = 0, directory_inspection_errors = 0;
         for (const auto &e : entries) {
             const RestorePlanItem item = inspect_restore_target(targetfd, e, overwrite);
             std::cout << "{\"type\":\"restore_plan_entry\",\"path\":" << json_quote(e.path)
@@ -1097,15 +1486,40 @@ int cmd_restore(const std::string &store, const std::string &id, const std::stri
             else if (item.action == "blocked" || item.action == "blocked_directory") ++blocked;
             else ++inspection_errors;
         }
+        for (const auto &directory : directories) {
+            const DirectoryPlanItem item = inspect_directory_target(targetfd, directory);
+            std::cout << "{\"type\":\"restore_plan_directory\",\"path\":" << json_quote(directory.path)
+                      << ",\"target_state\":" << json_quote(item.target_state)
+                      << ",\"action\":" << json_quote(item.action)
+                      << ",\"inspection_errno\":" << item.inspection_errno << "}\n";
+            if (item.action == "create") ++directories_to_create;
+            else if (item.action == "preserve") ++directories_preserved;
+            else if (item.action == "blocked") ++directories_blocked;
+            else ++directory_inspection_errors;
+        }
         close(targetfd);
-        audit(store, "restore_dry_run", id, entries.size(), planned_bytes, false);
+        audit(store, "restore_dry_run", id, entries.size() + directories.size(), planned_bytes, false);
         std::cout << "{\"type\":\"restore_plan_summary\",\"dry_run\":true,\"overwrite\":"
                   << (overwrite ? "true" : "false") << ",\"entry_count\":" << entries.size()
+                  << ",\"directory_count\":" << directories.size()
                   << ",\"would_create\":" << would_create << ",\"would_replace\":" << would_replace
                   << ",\"preserved_conflicts\":" << preserved << ",\"blocked\":" << blocked
                   << ",\"inspection_errors\":" << inspection_errors
+                  << ",\"directories_to_create\":" << directories_to_create
+                  << ",\"directories_preserved\":" << directories_preserved
+                  << ",\"directories_blocked\":" << directories_blocked
+                  << ",\"directory_inspection_errors\":" << directory_inspection_errors
                   << ",\"deletes\":0,\"writes_performed\":false}\n";
-        return (blocked || inspection_errors) ? 2 : 0;
+        return (blocked || inspection_errors || directories_blocked || directory_inspection_errors) ? 2 : 0;
+    }
+    int directories_created = 0, directories_failed = 0;
+    for (const auto &directory : directories) {
+        const int rc = restore_directory(targetfd, directory);
+        if (rc == 0) ++directories_created;
+        else if (rc < 0) {
+            std::cout << "failed directory " << directory.path << ": " << strerror(errno) << '\n';
+            ++directories_failed;
+        }
     }
     for (const auto &e : entries) {
         int rc = restore_one(targetfd, store, e, overwrite);
@@ -1115,11 +1529,13 @@ int cmd_restore(const std::string &store, const std::string &id, const std::stri
         else { ++restored; restored_bytes += e.size; }
     }
     close(targetfd);
-    audit(store, "restore", id, static_cast<std::size_t>(restored), restored_bytes, confirm);
+    audit(store, "restore", id, static_cast<std::size_t>(restored + directories_created), restored_bytes, confirm);
     std::cout << "{\"restored\":" << restored << ",\"conflicts\":" << conflicts
+              << ",\"directories_created\":" << directories_created
+              << ",\"directories_failed\":" << directories_failed
               << ",\"metadata_partial\":" << metadata_partial
               << ",\"failed\":" << failed << ",\"dry_run\":false}\n";
-    return (failed || metadata_partial) ? 2 : 0;
+    return (failed || directories_failed || metadata_partial) ? 2 : 0;
 }
 
 int cmd_prune(const std::string &store, unsigned keep) {
