@@ -46,7 +46,7 @@
 31. `cmd_init`에서 store 부모를 canonicalize한 후 mkdir 전에 overlap을 검사하는 이유는 무엇이며, mkdir 후 재검사는 어떤 경쟁을 다룹니까?
 32. path fuzzer가 10,000 runs를 통과했다는 결과가 실제 `openat2` 경로 안전성이나 전체 SRS fuzz 요구사항을 증명하지 않는 이유는 무엇입니까?
 33. `scan_tree`는 디렉터리 FD와 `fstatat` 정보를 어떤 순서로 사용하며, 열린 하위 디렉터리의 inode 비교가 해결하는 경쟁은 무엇입니까?
-34. `directory_entries`에 경로만 저장하는 현재 설계가 빈 디렉터리 복원에는 충분하지만 mode/owner/mtime 복원에는 부족한 이유는 무엇입니까?
+34. 새 snapshot에서 디렉터리 mode/owner/mtime을 파일 복원 이후 깊은 순서로 적용하는 이유는 무엇이며, 기존 디렉터리와 이전 형식 snapshot은 어떻게 다룹니까?
 35. snapshot에서 symlink 경로와 유형만 기록하고 link target을 읽지 않는 선택이 traversal 위험과 감사 정보 사이에서 어떤 경계를 만듭니까?
 36. `different_device` 제외 정책이 bind mount, 일반 mount 경계, 동일 device의 다른 파일시스템 구성에서 어떤 한계를 가집니까?
 37. `--exclude-extension .tmp` 필터는 basename 기준으로 어떻게 적용되며 대소문자 정규화가 manifest 재현성에 어떤 영향을 줍니까?

@@ -22,15 +22,15 @@
 
 **완료 기준:** sentinel은 바뀌지 않습니다. 결과는 committed 데이터와 audit 기록 실패를 구분할 수 있어야 하며, 테스트가 임시 디렉터리 밖을 건드리지 않습니다.
 
-## 과제 3 — 디렉터리 메타데이터 보존 설계
+## 과제 3 — 레거시 스냅샷 호환성 회귀 테스트
 
-**목표:** 현재 path-only directory manifest를 mode, uid/gid, mtime을 포함하는 계약으로 확장하고 복원 결과의 partial metadata 상태를 다룹니다.
+**목표:** 기존 path-only `directory_entries`가 새 DB 열기와 manifest 일치 검사 뒤에도 읽히는지 독립적으로 입증합니다.
 
-**읽을 위치:** `DirectoryEntry`, `directory_entries`, `manifest_document`, `restore_directory`, `contracts/manifest-v1.schema.json`, `tests/smoke.sh`.
+**읽을 위치:** `open_db`, `load_directories`, `manifest_document`, `manifest_matches_db`, `contracts/manifest-v1.schema.json`, `tests/smoke.sh`.
 
-하위 디렉터리, 빈 디렉터리, 이미 존재하는 target directory, 쓰기 권한이 부족한 target을 포함하는 fixture를 구성하세요. 자식 파일 설치 뒤 디렉터리 시간을 적용하는 순서, 소유권 변경이 거부되는 경우, umask 영향을 설명하고 검증 가능한 결과 계약을 설계하세요.
+별도 임시 저장소에 이전 형식의 directory row와 해당 sidecar를 준비하고, 현재 바이너리에서 `show`, `verify`, `restore --dry-run`을 호출하는 소규모 회귀 fixture를 작성하세요. 새 스냅샷에는 directory metadata가 들어가는지, 기존 sidecar는 바뀌지 않는지도 비교하세요.
 
-**완료 기준:** manifest schema와 DB sidecar 정합성이 유지되고, 허용된 메타데이터는 정확히 복원되며, 거부된 metadata 적용은 명시적 partial 결과가 됩니다. 기존 파일 보호와 target 밖 경로 불변 조건을 회귀 시험으로 보존합니다.
+**완료 기준:** 이전 형식 sidecar의 canonical bytes가 그대로 유지되고, 새 형식의 mode·uid/gid·mtime 계약이 schema와 일치하며, 경로 밖 쓰기나 기존 대상 변경이 없습니다. 시도 전에는 완성 코드를 제공하지 않습니다.
 
 ## 시도 기록
 

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 새 스냅샷의 디렉터리 mode·uid/gid·mtime을 SQLite와 manifest에 기록하고, 새로 생성한 복원 디렉터리에 파일 복원 뒤 깊은 순서로 적용합니다. 이전 path-only snapshot은 유지됩니다. 이 변경은 미검증입니다.
 - `init --max-store-bytes`에 persistent content-blob quota와 dedup-aware enforcement를 추가했습니다. 최신 quota 및 restore target identity recheck 변경은 아직 기술 검증하지 않았습니다.
 - 복원 설치 직전에 대상 `(device,inode,type)`을 재확인해 감지 가능한 변경을 거부합니다. 마지막 검사와 rename 사이의 외부 writer 경합은 남습니다.
 - `restore --dry-run`에 schema 검증 가능한 항목별 생성/보존/교체/차단 계획과 요약을 추가했습니다. target에 쓰거나 삭제하지 않으며, 실제 적용 전까지 경쟁 상태가 바뀔 수 있음을 문서화했습니다.

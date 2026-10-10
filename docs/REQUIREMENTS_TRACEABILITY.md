@@ -20,7 +20,7 @@
 | SRE-FR-010 | schema형 JSONL dry-run 계획: 파일 및 디렉터리 생성/보존/교체/차단 및 delete=0 | 기존 파일 계획은 이전 revision에서 smoke/schema 확인; directory plan 구현 추가 후 미검증. 실제 설치 직전 대상 identity 재확인도 추가했으나 미검증; 외부 writer와의 마지막 syscall 경합은 남음 |
 | SRE-FR-011 | `--confirm`, `--overwrite`, 기존 파일 기본 보호 | `--overwrite`만 주고 `--confirm`을 생략하면 exit 2이며 기존 sentinel이 그대로임을 smoke로 확인 |
 | SRE-FR-012 | 같은 디렉터리 temp, 해시 확인, `renameat2`, 설치 후 재해시, directory fsync | staged hash와 설치 직전 기존 target identity 재확인 뒤 rename; installed path를 nofollow로 다시 열어 inode/size/hash를 확인한 뒤 parent fsync; 최신 코드의 fault/경합 시험 미실행 |
-| SRE-FR-013 | mode, uid/gid, mtime 복원 시도와 partial 결과 | source와 restore의 mode·uid·gid·mtime equality를 smoke로 확인; 타 UID 소유권 복원 및 권한 실패/partial matrix는 미검증 |
+| SRE-FR-013 | 파일 및 새로 생성한 디렉터리의 mode, uid/gid, mtime 복원 시도와 partial 결과 | 파일 metadata equality는 이전 revision의 smoke 결과. 새 snapshot은 directory metadata를 SQLite와 canonical manifest에 기록하고, 새로 생성한 directory의 inode 확인 후 파일 복원 뒤 깊은 순서로 적용한다. Legacy path-only row는 보존한다. 이 변경 및 타 UID/권한 실패/partial matrix는 미검증 |
 | SRE-FR-014 | 선택된 경로만 설치하고 unrelated target 삭제 없음 | restore 뒤 manifest 밖 unrelated sentinel이 보존됨을 smoke로 확인 |
 | SRE-FR-015 | retention prune, DB 참조 기반 blob GC, 공유 blob 보존, optional byte quota | shared-blob smoke는 이전 revision에서 통과; persistent `--max-store-bytes` content-blob quota 구현, dedup allowance와 over-limit rejection은 최신 변경으로 미검증 |
 | SRE-FR-016 | 실패 상태·temp 정리, sidecar recovery | synthetic 상태 및 고아 sidecar smoke; crash/ENOSPC/EIO 주입 미실행 |

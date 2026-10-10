@@ -12,7 +12,7 @@
 
 ## 현재 revision의 구현 변경 후 상태
 
-2026-10-10에 directory path manifest, 지원하지 않는 항목의 명시적 제외 기록, 반복형 extension filter, 파일별 `observed_at_ns` 및 legacy DB migration, directory restore 계획, per-user systemd timer 예시, persistent `--max-store-bytes` content-blob quota, restore 설치 직전 target identity 재확인을 추가했습니다. 사용자가 검증을 중단하고 구현을 계속하라고 지시했으므로 이 변경 뒤에는 빌드, CTest, schema validation, analyzer, `git diff --check`를 실행하지 않았습니다. 아래에 적은 통과 결과는 변경 전 revision의 역사적 증거이며 현재 파일의 검증 결과로 해석하면 안 됩니다.
+2026-10-10에 directory path/metadata manifest, 지원하지 않는 항목의 명시적 제외 기록, 반복형 extension filter, 파일별 `observed_at_ns` 및 legacy DB migration, directory restore 계획과 새 directory의 후행 metadata 적용, per-user systemd timer 예시, persistent `--max-store-bytes` content-blob quota, restore 설치 직전 target identity 재확인을 추가했습니다. 사용자가 검증을 중단하고 구현을 계속하라고 지시했으므로 이 변경 뒤에는 빌드, CTest, schema validation, analyzer, `git diff --check`를 실행하지 않았습니다. 아래에 적은 통과 결과는 변경 전 revision의 역사적 증거이며 현재 파일의 검증 결과로 해석하면 안 됩니다.
 
 ## 이전 revision에서 실행한 검증
 

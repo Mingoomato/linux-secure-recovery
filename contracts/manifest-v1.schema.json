@@ -56,7 +56,17 @@
         "type": "object",
         "required": ["relative_path"],
         "properties": {
-          "relative_path": {"type": "string", "minLength": 1}
+          "relative_path": {"type": "string", "minLength": 1},
+          "mode": {"type": "integer", "minimum": 0, "maximum": 511},
+          "uid": {"type": "integer", "minimum": 0},
+          "gid": {"type": "integer", "minimum": 0},
+          "mtime_ns": {"type": "integer"}
+        },
+        "dependentRequired": {
+          "mode": ["uid", "gid", "mtime_ns"],
+          "uid": ["mode", "gid", "mtime_ns"],
+          "gid": ["mode", "uid", "mtime_ns"],
+          "mtime_ns": ["mode", "uid", "gid"]
         },
         "additionalProperties": false
       }

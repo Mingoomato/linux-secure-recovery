@@ -6,7 +6,7 @@
 4. Blob은 temp 파일에 기록하고 file `fsync`, 같은 store filesystem 안에서 rename, shard directory `fsync` 후 DB entry가 참조합니다.
 5. SQLite는 WAL, `synchronous=FULL`, foreign key를 설정합니다. snapshot row는 `COPYING`, `VERIFIED`, `COMMITTED` 상태를 거칩니다. DB와 파일시스템은 별도 commit domain입니다.
 6. `manifest.v1` sidecar는 DB의 파일·디렉터리·제외 항목에서 canonical JSON으로 생성되고 SHA-256 integrity field를 포함합니다. signature/authentication을 제공하지 않습니다.
-7. Restore dry-run은 target dirfd를 따라 파일·디렉터리 충돌 계획을 JSONL로 출력하며 target을 변경하지 않습니다. 승인된 적용은 디렉터리를 먼저 만들고 파일별 temp write/hash check/metadata attempt/`renameat2`/parent directory `fsync`로 처리합니다. 트리 전체 atomicity는 주장하지 않습니다.
+7. Restore dry-run은 target dirfd를 따라 파일·디렉터리 충돌 계획을 JSONL로 출력하며 target을 변경하지 않습니다. 승인된 적용은 디렉터리를 먼저 만들고 파일별 temp write/hash check/metadata attempt/`renameat2`/parent directory `fsync`로 처리합니다. 새로 생성한 디렉터리의 mode·uid/gid·mtime은 파일 복원 뒤 깊은 순서로 적용하며 기존 디렉터리는 보존합니다. 트리 전체 atomicity는 주장하지 않습니다.
 8. Prune은 보존 밖 DB 참조를 삭제한 뒤 sidecar 및 committed snapshot이 참조하지 않는 blob을 정리합니다. Doctor는 stale state, orphan sidecar, `.part` 항목을 보수적으로 회수합니다.
 9. `init --max-store-bytes`는 저장소 설정에 blob content quota를 기록합니다. Snapshot은 store lock 아래에서 기존 blob 사용량을 세고, dedup하지 않는 새 고유 blob만 상한과 대조합니다. 파일 데이터 상한이며 metadata/WAL/audit/temp 사용량이나 실제 디스크 여유 공간을 보장하지 않습니다.
 10. Restore는 staged file을 설치하기 직전 no-follow `fstatat`으로 대상 이름의 `(device,inode,type)`이 처음 관찰한 값과 같은지 다시 비교합니다. 변경을 감지하면 임시 파일을 제거하고 `ESTALE`/충돌로 중단합니다. 마지막 비교와 `renameat2` 사이의 경합은 advisory store lock을 무시하는 외부 프로세스에 대해 완전히 제거되지 않습니다.

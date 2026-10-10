@@ -28,7 +28,7 @@ rename 이후에도 새 경로를 `openat(O_NOFOLLOW)`로 다시 열어 설치�
 
 `restore --dry-run`은 target root FD를 복제하고 각 기존 부모를 `openat(O_DIRECTORY|O_NOFOLLOW)`로 확인합니다. 마지막 이름은 `fstatat(..., AT_SYMLINK_NOFOLLOW)`로 조사하므로 기존 symlink의 목적지를 열지 않습니다. 디렉터리 부모가 없으면 필요한 나머지 부모 수를 계획에 기록하고, symlink/non-directory 부모와 `--overwrite` 대상 directory는 차단 항목으로 표시합니다. 이 검사는 target tree에 쓰지 않지만 작업 전후를 잠그지 않으므로 실제 `restore`까지 대상이 그대로라고 보장하지 않습니다. Plan JSONL은 경로 문자열과 상태 enum, 계획 크기, 충돌 action 및 errno를 보존하고 schema로 확인합니다.
 
-빈 디렉터리도 `directories` 계획에 포함됩니다. directory 계획 함수는 `openat`와 `fstatat`만 사용하여 target을 바꾸지 않고, 실제 적용 경로의 `restore_directory`만 `mkdirat`로 생성합니다. 기존 directory는 보존하고 같은 이름의 symlink나 일반 파일은 실패시킵니다. 현재 directory mode, owner, timestamp는 저장하거나 적용하지 않으며 file metadata와 구분해야 합니다.
+빈 디렉터리도 `directories` 계획에 포함됩니다. directory 계획 함수는 `openat`와 `fstatat`만 사용하여 target을 바꾸지 않고, 실제 적용 경로의 `restore_directory`만 `mkdirat`로 생성합니다. 기존 directory는 보존하고 같은 이름의 symlink나 일반 파일은 실패시킵니다. 새 snapshot은 directory mode, owner, timestamp를 저장합니다. 파일 복원 뒤 새로 만든 directory FD를 `openat2` 제약으로 다시 열고 inode 동일성을 확인해 `fchown`, `fchmod`, `futimens`, `fsync`를 깊은 directory부터 적용합니다. 기존 directory metadata는 보존하고 이전 snapshot의 경로 전용 항목은 그대로 유지합니다. 현재 변경은 미검증입니다.
 
 ## SQLite 트랜잭션과 파일시스템
 

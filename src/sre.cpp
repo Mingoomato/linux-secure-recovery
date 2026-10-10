@@ -46,6 +46,10 @@ struct Entry {
 };
 struct DirectoryEntry {
     std::string path;
+    std::int64_t mode = -1;
+    std::int64_t uid = -1;
+    std::int64_t gid = -1;
+    std::int64_t mtime_ns = 0;
 };
 struct BlobQuota {
     std::uint64_t limit = 0;
@@ -289,6 +293,8 @@ sqlite3 *open_db(const std::string &store, bool create) {
         " stable INTEGER NOT NULL, observed_at_ns INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(snapshot_id,relative_path),"
         " FOREIGN KEY(snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE);"
         "CREATE TABLE IF NOT EXISTS directory_entries(snapshot_id TEXT NOT NULL,relative_path TEXT NOT NULL,"
+        " mode INTEGER NOT NULL DEFAULT -1,uid INTEGER NOT NULL DEFAULT -1,"
+        " gid INTEGER NOT NULL DEFAULT -1,mtime_ns INTEGER NOT NULL DEFAULT 0,"
         " PRIMARY KEY(snapshot_id,relative_path),"
         " FOREIGN KEY(snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE);"
         "CREATE TABLE IF NOT EXISTS store_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);"
@@ -320,6 +326,26 @@ sqlite3 *open_db(const std::string &store, bool create) {
         if (!has_observed_at)
             exec_sql(db, "ALTER TABLE entries ADD COLUMN observed_at_ns INTEGER NOT NULL DEFAULT 0",
                      "add per-file observation time");
+        for (const char *field : {"mode", "uid", "gid", "mtime_ns"}) {
+            bool present = false;
+            sqlite3_stmt *directory_columns = nullptr;
+            sql_check(sqlite3_prepare_v2(db, "PRAGMA table_info(directory_entries)", -1,
+                                         &directory_columns, nullptr), db,
+                      "prepare directory schema migration");
+            int directory_rc = SQLITE_OK;
+            while ((directory_rc = sqlite3_step(directory_columns)) == SQLITE_ROW) {
+                const auto *name = sqlite3_column_text(directory_columns, 1);
+                if (name && std::string(reinterpret_cast<const char *>(name)) == field) present = true;
+            }
+            sqlite3_finalize(directory_columns);
+            sql_check(directory_rc, db, "read directory schema migration");
+            if (!present) {
+                const std::string alter = std::string("ALTER TABLE directory_entries ADD COLUMN ") +
+                    field + " INTEGER NOT NULL DEFAULT " +
+                    (std::string(field) == "mtime_ns" ? "0" : "-1");
+                exec_sql(db, alter.c_str(), "add directory metadata column");
+            }
+        }
     } catch (...) {
         sqlite3_close(db);
         throw;
@@ -697,23 +723,32 @@ void scan_tree(int rootfd, int currentfd, const std::string &prefix,
             }
             if (S_ISDIR(st.st_mode)) {
                 DirectoryEntry directory {rel};
-                sqlite3_stmt *directory_stmt = nullptr;
-                sql_check(sqlite3_prepare_v2(db,
-                    "INSERT INTO directory_entries(snapshot_id,relative_path) VALUES(?1,?2)",
-                    -1, &directory_stmt, nullptr), db, "prepare directory entry");
-                sqlite3_bind_text(directory_stmt, 1, snapshot.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(directory_stmt, 2, directory.path.c_str(), -1, SQLITE_TRANSIENT);
-                const int directory_rc = sqlite3_step(directory_stmt);
-                const int directory_finalize_rc = sqlite3_finalize(directory_stmt);
-                sql_check(directory_rc, db, "insert directory entry");
-                sql_check(directory_finalize_rc, db, "finalize directory entry insert");
-                directories.push_back(directory);
                 UniqueFd child(open_beneath(rootfd, rel, O_RDONLY | O_DIRECTORY | O_NOFOLLOW));
                 if (child.get() < 0) throw std::runtime_error("openat2 rejected directory " + rel);
                 struct stat opened_directory {};
                 if (fstat(child.get(), &opened_directory) != 0 ||
                     opened_directory.st_dev != st.st_dev || opened_directory.st_ino != st.st_ino)
                     throw std::runtime_error("SNAPSHOT_UNSTABLE: directory changed during traversal: " + rel);
+                directory.mode = static_cast<std::int64_t>(opened_directory.st_mode & 0777);
+                directory.uid = static_cast<std::int64_t>(opened_directory.st_uid);
+                directory.gid = static_cast<std::int64_t>(opened_directory.st_gid);
+                directory.mtime_ns = mtime_ns(opened_directory);
+                sqlite3_stmt *directory_stmt = nullptr;
+                sql_check(sqlite3_prepare_v2(db,
+                    "INSERT INTO directory_entries(snapshot_id,relative_path,mode,uid,gid,mtime_ns)"
+                    " VALUES(?1,?2,?3,?4,?5,?6)",
+                    -1, &directory_stmt, nullptr), db, "prepare directory entry");
+                sqlite3_bind_text(directory_stmt, 1, snapshot.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(directory_stmt, 2, directory.path.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_int64(directory_stmt, 3, directory.mode);
+                sqlite3_bind_int64(directory_stmt, 4, directory.uid);
+                sqlite3_bind_int64(directory_stmt, 5, directory.gid);
+                sqlite3_bind_int64(directory_stmt, 6, directory.mtime_ns);
+                const int directory_rc = sqlite3_step(directory_stmt);
+                const int directory_finalize_rc = sqlite3_finalize(directory_stmt);
+                sql_check(directory_rc, db, "insert directory entry");
+                sql_check(directory_finalize_rc, db, "finalize directory entry insert");
+                directories.push_back(directory);
                 scan_tree(rootfd, child.get(), rel, rootdev, entries, directories,
                         excluded_entries, db, snapshot, store, excluded_extensions,
                           counter, quota, depth + 1U);
@@ -803,7 +838,8 @@ std::vector<Entry> load_entries(sqlite3 *db, const std::string &id) {
 std::vector<DirectoryEntry> load_directories(sqlite3 *db, const std::string &id) {
     sqlite3_stmt *stmt = nullptr;
     sql_check(sqlite3_prepare_v2(db,
-        "SELECT relative_path FROM directory_entries WHERE snapshot_id=?1 ORDER BY relative_path",
+        "SELECT relative_path,mode,uid,gid,mtime_ns FROM directory_entries"
+        " WHERE snapshot_id=?1 ORDER BY relative_path",
         -1, &stmt, nullptr), db, "prepare directory query");
     sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
     std::vector<DirectoryEntry> result;
@@ -820,6 +856,19 @@ std::vector<DirectoryEntry> load_directories(sqlite3 *db, const std::string &id)
         if (!sre::path::safe_relative_path(directory.path)) {
             sqlite3_finalize(stmt);
             throw std::runtime_error("unsafe directory path in snapshot database");
+        }
+        directory.mode = sqlite3_column_int64(stmt, 1);
+        directory.uid = sqlite3_column_int64(stmt, 2);
+        directory.gid = sqlite3_column_int64(stmt, 3);
+        directory.mtime_ns = sqlite3_column_int64(stmt, 4);
+        if (directory.mode < -1 || directory.mode > 0777 ||
+            directory.uid < -1 || directory.uid > UINT32_MAX ||
+            directory.gid < -1 || directory.gid > UINT32_MAX ||
+            (directory.mode >= 0 && (directory.uid < 0 || directory.gid < 0)) ||
+            (directory.mode == -1 && (directory.uid != -1 || directory.gid != -1 ||
+                                      directory.mtime_ns != 0))) {
+            sqlite3_finalize(stmt);
+            throw std::runtime_error("invalid directory metadata in snapshot database");
         }
         result.push_back(std::move(directory));
     }
@@ -916,7 +965,14 @@ std::string manifest_document(const std::string &id, const std::string &source,
         payload << ",\"directories\":[";
         for (std::size_t i = 0; i < directories.size(); ++i) {
             if (i != 0U) payload << ',';
-            payload << "{\"relative_path\":" << json_quote(directories[i].path) << '}';
+            payload << "{\"relative_path\":" << json_quote(directories[i].path);
+            if (directories[i].mode >= 0) {
+                payload << ",\"mode\":" << directories[i].mode
+                        << ",\"uid\":" << directories[i].uid
+                        << ",\"gid\":" << directories[i].gid
+                        << ",\"mtime_ns\":" << directories[i].mtime_ns;
+            }
+            payload << '}';
         }
         payload << ']';
     }
@@ -1500,7 +1556,7 @@ DirectoryPlanItem inspect_directory_target(int rootfd, const DirectoryEntry &ent
     return result;
 }
 
-int restore_directory(int targetfd, const DirectoryEntry &entry) {
+int restore_directory(int targetfd, const DirectoryEntry &entry, struct stat *created_identity) {
     if (!sre::path::safe_relative_path(entry.path)) { errno = EINVAL; return -1; }
     const std::size_t slash = entry.path.find_last_of('/');
     const std::string parent = slash == std::string::npos ? "" : entry.path.substr(0, slash);
@@ -1530,7 +1586,33 @@ int restore_directory(int targetfd, const DirectoryEntry &entry) {
         errno = saved ? saved : EIO;
         return -1;
     }
+    if (created && created_identity) *created_identity = st;
     return created ? 0 : 1;
+}
+
+int finalize_directory_metadata(int targetfd, const DirectoryEntry &entry,
+                                const struct stat &created_identity) {
+    if (entry.mode < 0) return 0;
+    UniqueFd fd(open_beneath(targetfd, entry.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW));
+    if (fd.get() < 0) return -1;
+    struct stat current {};
+    if (fstat(fd.get(), &current) != 0 || !S_ISDIR(current.st_mode) ||
+        current.st_dev != created_identity.st_dev || current.st_ino != created_identity.st_ino) {
+        errno = ESTALE;
+        return -1;
+    }
+    bool partial = false;
+    if (fchown(fd.get(), static_cast<uid_t>(entry.uid), static_cast<gid_t>(entry.gid)) != 0)
+        partial = true;
+    if (fchmod(fd.get(), static_cast<mode_t>(entry.mode)) != 0) partial = true;
+    std::int64_t seconds = entry.mtime_ns / 1000000000LL;
+    std::int64_t nanoseconds = entry.mtime_ns % 1000000000LL;
+    if (nanoseconds < 0) { --seconds; nanoseconds += 1000000000LL; }
+    struct timespec times[2] {{0, UTIME_OMIT},
+        {static_cast<time_t>(seconds), static_cast<long>(nanoseconds)}};
+    if (futimens(fd.get(), times) != 0) partial = true;
+    if (fsync(fd.get()) != 0) return -1;
+    return partial ? 2 : 0;
 }
 
 int restore_one(int targetfd, const std::string &store, const Entry &e, bool overwrite) {
@@ -1710,9 +1792,14 @@ int cmd_restore(const std::string &store, const std::string &id, const std::stri
         return (blocked || inspection_errors || directories_blocked || directory_inspection_errors) ? 2 : 0;
     }
     int directories_created = 0, directories_failed = 0;
+    std::map<std::string, struct stat> created_directory_identities;
     for (const auto &directory : directories) {
-        const int rc = restore_directory(targetfd, directory);
-        if (rc == 0) ++directories_created;
+        struct stat created_identity {};
+        const int rc = restore_directory(targetfd, directory, &created_identity);
+        if (rc == 0) {
+            ++directories_created;
+            created_directory_identities.emplace(directory.path, created_identity);
+        }
         else if (rc < 0) {
             std::cout << "failed directory " << directory.path << ": " << strerror(errno) << '\n';
             ++directories_failed;
@@ -1724,6 +1811,22 @@ int cmd_restore(const std::string &store, const std::string &id, const std::stri
         else if (rc == 2) { ++restored; ++metadata_partial; restored_bytes += e.size; }
         else if (rc != 0) { std::cout << "failed " << e.path << ": " << strerror(errno) << '\n'; ++failed; }
         else { ++restored; restored_bytes += e.size; }
+    }
+    std::sort(directories.begin(), directories.end(), [](const DirectoryEntry &left,
+                                                          const DirectoryEntry &right) {
+        const auto left_depth = std::count(left.path.begin(), left.path.end(), '/');
+        const auto right_depth = std::count(right.path.begin(), right.path.end(), '/');
+        return left_depth == right_depth ? left.path > right.path : left_depth > right_depth;
+    });
+    for (const auto &directory : directories) {
+        const auto created = created_directory_identities.find(directory.path);
+        if (created == created_directory_identities.end()) continue;
+        const int rc = finalize_directory_metadata(targetfd, directory, created->second);
+        if (rc == 2) ++metadata_partial;
+        else if (rc != 0) {
+            ++directories_failed;
+            std::cout << "failed directory metadata " << directory.path << ": " << strerror(errno) << '\n';
+        }
     }
     close(targetfd);
     audit(store, "restore", id, static_cast<std::size_t>(restored + directories_created), restored_bytes, confirm);

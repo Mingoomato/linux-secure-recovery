@@ -1,6 +1,6 @@
 # SRE 검증 계획
 
-현재 revision은 directory/exclusion manifest, extension filter, directory restore plan, content quota, restore target identity recheck 변경 후 검증하지 않았습니다. 아래 완료 항목은 변경 전 revision의 기록이며 이번 코드 상태를 통과로 표시하지 않습니다.
+현재 revision은 directory/exclusion manifest, extension filter, directory restore plan/metadata, content quota, restore target identity recheck 변경 후 검증하지 않았습니다. 아래 완료 항목은 변경 전 revision의 기록이며 이번 코드 상태를 통과로 표시하지 않습니다.
 
 ## 완료된 로컬 게이트
 
@@ -16,7 +16,7 @@
 
 ## 후속 승격 게이트
 
-1. 전체 특수 항목 행렬, directory create/preserve/blocked 계획, symlink parent, zero-byte/Unicode/binary/1 GiB 경계, extension filter와 제외 항목 기록, 새 DB와 legacy DB의 `observed_at_ns` 호환성을 검증.
+1. 전체 특수 항목 행렬, directory create/preserve/blocked 계획, 새로 생성한 nested/empty directory의 mode·uid/gid·mtime, 기존 directory metadata 보존, 불가능한 chown의 partial 결과, legacy path-only row/manifest 호환성, directory 교체 경합에서 inode 불일치 거부, symlink parent, zero-byte/Unicode/binary/1 GiB 경계, extension filter와 제외 항목 기록, 새 DB와 legacy DB의 `observed_at_ns` 호환성을 검증.
 2. snapshot 도중 source mutation, ENOSPC/EIO/EACCES와 fsync/rename fault injection.
 3. 실제 강제 종료 지점을 단계별로 주입하고 이전 committed snapshot의 유지 여부를 확인.
 4. dry-run 계획 이후 overwrite race, installed path 재개방 및 inode/size/hash post-check를 검증.
