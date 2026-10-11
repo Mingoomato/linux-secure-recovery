@@ -6,10 +6,21 @@
   "remaining": "Crash/power-loss, resource-fault, external-writer race and privilege/OS matrices remain pending.",
   "source_sha256": {
     "src/sre.cpp": "2aca36fb0b6c6b3ce163f564c1ab5605df4202277f68f3f28223b44bcde9bc56",
-    "tests/metadata_quota.py": "77f53148f01439648a1e3fb511eed1f9b58eb6054e62cb5969eaa31d27ed621c",
-    "contracts/operation-v1.schema.json": "82b5411cd82d54f7a9a607d8637ca78d49125f8d85ee49c4aca554e35424c13e"
+    "tests/metadata_quota.py": "5868540c277ad937628c0adc19cccb42c9af30120a933acfce40fe5b4e674edb",
+    "contracts/operation-v1.schema.json": "82b5411cd82d54f7a9a607d8637ca78d49125f8d85ee49c4aca554e35424c13e",
+    "tests/smoke.sh": "f110fc5b158bf6d2fa72bd44607a3a71d6ec59eca8bd8bfdd747238df52c8bbd"
   },
   "owner_mastery": "unassessed",
   "remote_ci": "blocked_before_execution_account_billing_or_spending_limit",
-  "remote_ci_url": "https://github.com/Mingoomato/linux-secure-recovery/actions/runs/38107487256"
+  "remote_ci_url": "https://github.com/Mingoomato/linux-secure-recovery/actions/runs/38107487256",
+  "local_followup": {
+    "date": "2026-10-11",
+    "host": "Kali Linux 7.1.5+kali-amd64 x86_64",
+    "gcc_release_ctest": "3/3 pass",
+    "clang_release_ctest": "3/3 pass",
+    "clang_asan_ubsan": "3/3 CTest pass",
+    "fuzz_smoke_requested_runs": 20000,
+    "kernel_module_compile": "not_applicable",
+    "full_srs_status": "pending"
+  }
 }
