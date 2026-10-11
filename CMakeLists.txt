@@ -14,10 +14,13 @@ target_link_libraries(sre PRIVATE OpenSSL::Crypto SQLite3::SQLite3)
 
 include(CTest)
 if(BUILD_TESTING)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_executable(path_safety_test tests/path_safety_test.cpp)
     target_compile_options(path_safety_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME path-safety-unit COMMAND path_safety_test)
     add_test(NAME recovery-smoke COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke.sh)
+    add_test(NAME recovery-metadata-quota COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/metadata_quota.py $<TARGET_FILE:sre>)
     set_tests_properties(recovery-smoke PROPERTIES
         ENVIRONMENT "BIN_DIR=${CMAKE_CURRENT_BINARY_DIR}")
 endif()

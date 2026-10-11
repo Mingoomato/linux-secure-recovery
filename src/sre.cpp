@@ -671,7 +671,7 @@ void save_blob(int rootfd, const std::string &store, const std::string &snapshot
             throw std::runtime_error("blob directory fsync failed");
         }
         close(dfd);
-        if (quota.limit != 0U) quota.used += entry.size;
+        quota.used += entry.size;
     } else { unlink(temp.c_str()); throw std::runtime_error("cannot safely inspect existing content-addressed blob"); }
 }
 
@@ -1088,7 +1088,7 @@ std::string snapshot_source(sqlite3 *db, const std::string &id) {
 
 void audit(const std::string &store, const std::string &operation, const std::string &id,
            std::size_t count, std::uint64_t bytes, bool confirmed,
-           std::size_t excluded_count = 0U) {
+           std::size_t excluded_count = 0U, std::size_t directory_count = 0U) {
     UniqueFd fd(open((store + "/audit/events.ndjson").c_str(),
                      O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600));
     if (fd.get() < 0) throw std::runtime_error("cannot open audit log: " + std::string(strerror(errno)));
@@ -1102,6 +1102,7 @@ void audit(const std::string &store, const std::string &operation, const std::st
     line << "{\"schema_version\":\"operation.v1\",\"operation\":" << json_quote(operation)
          << ",\"snapshot_id\":" << json_quote(id) << ",\"affected_count\":" << count
          << ",\"byte_count\":" << bytes
+         << ",\"directory_count\":" << directory_count
          << ",\"confirmed\":" << (confirmed ? "true" : "false")
          << ",\"observed_at\":" << now;
     if (operation == "snapshot") line << ",\"excluded_count\":" << excluded_count;
@@ -1192,7 +1193,7 @@ int cmd_snapshot(int argc, char **argv) {
     BlobQuota quota;
     try {
         quota.limit = configured_blob_quota(db);
-        if (quota.limit != 0U) quota.used = blob_store_usage(store);
+        quota.used = blob_store_usage(store);
         exec_sql(db, "BEGIN IMMEDIATE", "begin COPYING transaction");
         sql_check(sqlite3_prepare_v2(db,
             "INSERT INTO snapshots(id,source_root,created_at,state) VALUES(?1,?2,?3,'COPYING')",
@@ -1242,7 +1243,8 @@ int cmd_snapshot(int argc, char **argv) {
         entry_transaction_open = false;
         committed = true;
 
-        audit(store, "snapshot", id, entries.size(), total_bytes(entries), true, excluded_entries.size());
+        audit(store, "snapshot", id, entries.size(), total_bytes(entries), true,
+              excluded_entries.size(), directories.size());
         close(rootfd); sqlite3_close(db);
         std::cout << id << " files=" << entries.size()
                   << " directories=" << directories.size()
@@ -1777,7 +1779,7 @@ int cmd_restore(const std::string &store, const std::string &id, const std::stri
             else ++directory_inspection_errors;
         }
         close(targetfd);
-        audit(store, "restore_dry_run", id, entries.size() + directories.size(), planned_bytes, false);
+        audit(store, "restore_dry_run", id, entries.size(), planned_bytes, false, 0U, directories.size());
         std::cout << "{\"type\":\"restore_plan_summary\",\"dry_run\":true,\"overwrite\":"
                   << (overwrite ? "true" : "false") << ",\"entry_count\":" << entries.size()
                   << ",\"directory_count\":" << directories.size()
@@ -1829,7 +1831,8 @@ int cmd_restore(const std::string &store, const std::string &id, const std::stri
         }
     }
     close(targetfd);
-    audit(store, "restore", id, static_cast<std::size_t>(restored + directories_created), restored_bytes, confirm);
+    audit(store, "restore", id, static_cast<std::size_t>(restored), restored_bytes, confirm,
+          0U, static_cast<std::size_t>(directories_created));
     std::cout << "{\"restored\":" << restored << ",\"conflicts\":" << conflicts
               << ",\"directories_created\":" << directories_created
               << ",\"directories_failed\":" << directories_failed

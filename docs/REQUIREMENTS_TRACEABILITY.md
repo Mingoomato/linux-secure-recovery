@@ -1,5 +1,7 @@
 # SRS-04 요구사항 추적표
 
+Latest scoped evidence: [2026-10-11 validation checkpoint](VALIDATION_CHECKPOINT.md). Historical pending/unverified rows below remain applicable to gates not exercised by that checkpoint.
+
 ## 별도 상태
 
 - 구현 상태: **PARTIAL** — 명령과 핵심 경로는 동작하지만 모든 MUST 요구사항/완료 DoD를 만족하지 않습니다.

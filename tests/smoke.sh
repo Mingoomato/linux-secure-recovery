@@ -280,8 +280,10 @@ source_bytes = sum(path.stat().st_size for path in source_dir.rglob("*")
                    if path.is_file() and not path.is_symlink())
 snapshot = next(item for item in records if item["operation"] == "snapshot" and item["snapshot_id"] == pruned_id)
 assert snapshot["affected_count"] == 3 and snapshot["byte_count"] == source_bytes
+assert snapshot["directory_count"] == 1
 restores = [item for item in records if item["operation"] == "restore"]
 assert any(item["affected_count"] == 3 and item["byte_count"] == source_bytes and item["confirmed"] for item in restores)
+assert any(item["affected_count"] == 3 and item["directory_count"] == 1 for item in restores)
 prune = next(item for item in records if item["operation"] == "prune")
 assert prune["affected_count"] == 1 and prune["byte_count"] == source_bytes and prune["confirmed"]
 mode = stat.S_IMODE(audit_path.stat().st_mode)

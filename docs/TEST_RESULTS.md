@@ -1,5 +1,7 @@
 # SRE 기술 검증 결과
 
+> Latest / 최신: [2026-10-11 checkpoint](VALIDATION_CHECKPOINT.md). Earlier entries below describe their own historical revisions; they do not override this scoped checkpoint.
+
 기준일: 2026-10-10 · 대상: 현재 Linux 작업 호스트 · SRS 전체 완료 판정이 아니라 실행한 게이트의 기록입니다.
 
 ## 상태 분리

@@ -26,6 +26,7 @@
       "description": "Logical bytes represented or affected; prune does not report physical bytes reclaimed."
     },
     "excluded_count": { "type": "integer", "minimum": 0 },
+    "directory_count": { "type": "integer", "minimum": 0, "description": "Directories represented, planned, or newly created; separate from affected_count. Zero for verify and prune." },
     "confirmed": { "type": "boolean" },
     "observed_at": { "type": "integer", "minimum": 0 }
   }
