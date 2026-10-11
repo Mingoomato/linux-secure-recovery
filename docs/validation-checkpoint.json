@@ -10,5 +10,6 @@
     "contracts/operation-v1.schema.json": "82b5411cd82d54f7a9a607d8637ca78d49125f8d85ee49c4aca554e35424c13e"
   },
   "owner_mastery": "unassessed",
-  "remote_ci": "new_workflow_pending_remote_run"
+  "remote_ci": "blocked_before_execution_account_billing_or_spending_limit",
+  "remote_ci_url": "https://github.com/Mingoomato/linux-secure-recovery/actions/runs/38107487256"
 }
