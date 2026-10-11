@@ -29,6 +29,23 @@ with tempfile.TemporaryDirectory(prefix="sre-metadata-") as tmp:
     snapshot_output = run("snapshot", "--source", source, "--store", store)
     snapshot = snapshot_output.split()[0]
     assert "blob_bytes=8" in snapshot_output
+    manifest = json.loads((store / "manifests" / f"{snapshot}.json").read_text())
+    assert manifest["entry_count"] == 1
+    assert manifest["entries"][0]["relative_path"] == "nested/data"
+    assert manifest["entries"][0]["observed_at_ns"] > 0
+    directory_records = {item["relative_path"]: item for item in manifest["directories"]}
+    assert set(directory_records) == {"nested", "nested/empty"}
+    assert directory_records["nested"]["mode"] == 0o750
+    assert directory_records["nested/empty"]["mtime_ns"] == timestamp
+    plan = [json.loads(line) for line in run(
+        "restore", "--store", store, "--snapshot", snapshot, "--target", target, "--dry-run"
+    ).splitlines()]
+    planned_directories = {item["path"]: item for item in plan
+                           if item["type"] == "restore_plan_directory"}
+    assert set(planned_directories) == {"nested", "nested/empty"}
+    assert all(item["action"] == "create" for item in planned_directories.values())
+    summary = next(item for item in plan if item["type"] == "restore_plan_summary")
+    assert summary["directory_count"] == summary["directories_to_create"] == 2
     duplicate = run("snapshot", "--source", source, "--store", store)
     assert "blob_bytes=8" in duplicate
     run("restore", "--store", store, "--snapshot", snapshot, "--target", target, "--confirm")
