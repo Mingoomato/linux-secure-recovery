@@ -11,14 +11,18 @@ printf 'recoverable bytes\n' >"$tmp/source/nested/data.txt"
 printf 'backslash path bytes\n' >"$tmp/source/nested/back\\slash.txt"
 printf 'unicode path bytes\n' >"$tmp/source/nested/한글.txt"
 python3 - "$tmp/source/nested/data.txt" <<'PY'
-import os, sys
+import errno, os, sys
 os.chmod(sys.argv[1], 0o640)
 groups = sorted(set(os.getgroups()) - {os.getgid()})
 if groups:
     try:
         os.chown(sys.argv[1], os.getuid(), groups[0])
-    except PermissionError:
-        pass
+    except OSError as error:
+        # An unmapped supplementary group in a user namespace can return
+        # EINVAL instead of EPERM. Ownership comparison still uses the
+        # existing source metadata in this environment.
+        if error.errno not in (errno.EPERM, errno.EINVAL):
+            raise
 os.utime(sys.argv[1], ns=(1_700_000_000_123456789, 1_700_000_000_123456789))
 PY
 printf 'do not follow\n' >"$tmp/external.txt"
